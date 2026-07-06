@@ -1,0 +1,6 @@
+{
+  "name": "Sistema IndusTrack",
+  "description": "Controle de entrada e saída de veículos, fila de produção, abastecimento e análise gerencial com gráficos operacionais integrados.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

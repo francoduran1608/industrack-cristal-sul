@@ -1,0 +1,5892 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { useStore } from '../store';
+import { 
+  Receipt, Plus, Trash2, Check, X, AlertCircle, TrendingUp, Coins, 
+  Upload, Calendar, DollarSign, Search, CheckCircle2, Info, ArrowRight,
+  ShieldAlert, Landmark, FileSpreadsheet, Eye, Printer, Filter, Lock, FileText,
+  AlertTriangle, Smartphone, Truck
+} from 'lucide-react';
+import { DriverSettlement, SettlementSale, SettlementExpense, SettlementSuprimento, BankTransaction, Movement, ProductionControl } from '../types';
+
+const isPurchaseType = (typeId: string, customTypes: any[]) => {
+  const norm = typeId.toLowerCase();
+  const matched = customTypes.find(c => c.id === typeId || c.type.toLowerCase() === norm);
+  if (matched) return matched.category === 'compra' || matched.category === 'vasilhame_rota';
+  return norm.includes('compra') || norm.includes('rota') || norm.includes('adicion') || norm.includes('aquisi');
+};
+
+const isDriverDeductibleAvaria = (typeId: string, customTypes: any[]) => {
+  const norm = typeId.toLowerCase().trim();
+  
+  // Explicitly ignore those that returned sealed or are non-driver deductible
+  if (norm === 'microfuro' || norm.includes('microfuro')) return false;
+  if (norm.includes('vencido (cheio)') || norm.includes('vencido cheio')) return false;
+  if (norm.includes('quebrado lacrado') || norm.includes('quebradolac')) return false;
+  if (
+    norm.includes('vencido do mês (seco)') || 
+    norm.includes('vencido do mes (seco)') || 
+    norm.includes('vencido do mês seco') || 
+    norm.includes('vencido do mes seco')
+  ) return false;
+  
+  const matched = customTypes.find(c => c.id === typeId || c.type.toLowerCase().trim() === norm);
+  
+  if (matched) {
+    if (matched.category === 'compra') return false;
+    if (matched.origin === 'cliente') return false;
+    
+    const mType = matched.type.toLowerCase().trim();
+    if (
+      mType.includes('vencido do mês (seco)') || 
+      mType.includes('vencido do mes (seco)') || 
+      mType.includes('vencido do mês seco') || 
+      mType.includes('vencido do mes seco')
+    ) {
+      return false;
+    }
+    
+    // Only the specified default avarias are discounted from the driver by default
+    if (mType === 'vencido' || mType === 'cheiro' || mType === 'lodo' || mType === 'quebrado') {
+      return true;
+    }
+    
+    return matched.descontarMotorista !== false;
+  }
+  
+  const isPurchase = norm.includes('compra') || norm.includes('adicion') || norm.includes('aquisi');
+  if (isPurchase) return false;
+  
+  // Default fallback to only count specified ones (excluding vencido do mês seco due to early check)
+  return norm.includes('vencido') || norm.includes('cheiro') || norm.includes('lodo') || norm.includes('quebrado');
+};
+
+// Robust helper to parse Brazilian date formats
+const parseDateString = (dateStr: string): string => {
+  if (!dateStr) return new Date().toISOString().split('T')[0];
+  
+  let clean = dateStr.replace(/["']/g, '').trim();
+  
+  // If it has space or T (which means time component), take the first part
+  if (clean.includes(' ')) {
+    clean = clean.split(' ')[0];
+  } else if (clean.includes('T')) {
+    clean = clean.split('T')[0];
+  }
+  
+  clean = clean.trim();
+  
+  // Format YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(clean)) {
+    return clean;
+  }
+  
+  // Format DD/MM/YYYY or DD-MM-YYYY
+  const dmyMatch = clean.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
+  if (dmyMatch) {
+    const d = dmyMatch[1].padStart(2, '0');
+    const m = dmyMatch[2].padStart(2, '0');
+    const y = dmyMatch[3];
+    return `${y}-${m}-${d}`;
+  }
+  
+  // Format DD/MM/YY or DD-MM-YY
+  const dmyShortMatch = clean.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2})$/);
+  if (dmyShortMatch) {
+    const d = dmyShortMatch[1].padStart(2, '0');
+    const m = dmyShortMatch[2].padStart(2, '0');
+    const y = '20' + dmyShortMatch[3];
+    return `${y}-${m}-${d}`;
+  }
+  
+  // Format DD.MM.YYYY
+  const dmyDotMatch = clean.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+  if (dmyDotMatch) {
+    const d = dmyDotMatch[1].padStart(2, '0');
+    const m = dmyDotMatch[2].padStart(2, '0');
+    const y = dmyDotMatch[3];
+    return `${y}-${m}-${d}`;
+  }
+
+  // Fallback: if we have 8 digits, try YYYYMMDD or DDMMYYYY
+  if (/^\d{8}$/.test(clean)) {
+    const first4 = parseInt(clean.substring(0, 4));
+    if (first4 >= 2020 && first4 <= 2035) {
+      return `${clean.substring(0, 4)}-${clean.substring(4, 6)}-${clean.substring(6, 8)}`;
+    } else {
+      return `${clean.substring(4, 8)}-${clean.substring(2, 4)}-${clean.substring(0, 2)}`;
+    }
+  }
+
+  return new Date().toISOString().split('T')[0];
+};
+
+const formatDateStringBR = (dateStr: string): string => {
+  if (!dateStr) return '';
+  const parts = dateStr.split('T')[0].split('-');
+  if (parts.length === 3) {
+    const [y, m, d] = parts;
+    return `${d}/${m}/${y}`;
+  }
+  return dateStr;
+};
+
+const calculateSalesPaymentBreakdown = (salesList: SettlementSale[]) => {
+  const totals = { dinheiro: 0, pix: 0, boleto: 0, cheque: 0, outros: 0 };
+  salesList.forEach(s => {
+    if (s.paymentsBreakdown) {
+      totals.dinheiro += s.paymentsBreakdown.dinheiro || 0;
+      totals.pix += s.paymentsBreakdown.pix || 0;
+      totals.boleto += s.paymentsBreakdown.boleto || 0;
+      totals.cheque += s.paymentsBreakdown.cheque || 0;
+      totals.outros += s.paymentsBreakdown.outros || 0;
+    } else {
+      const lineTotal = s.qty * s.value;
+      const method = s.paymentMethod || 'dinheiro';
+      if (method === 'dinheiro') totals.dinheiro += lineTotal;
+      else if (method === 'pix') totals.pix += lineTotal;
+      else if (method === 'boleto') totals.boleto += lineTotal;
+      else if (method === 'cheque') totals.cheque += lineTotal;
+      else totals.outros += lineTotal;
+    }
+  });
+
+  // Clean up floating point precision issues
+  totals.dinheiro = Number(totals.dinheiro.toFixed(2));
+  totals.pix = Number(totals.pix.toFixed(2));
+  totals.boleto = Number(totals.boleto.toFixed(2));
+  totals.cheque = Number(totals.cheque.toFixed(2));
+  totals.outros = Number(totals.outros.toFixed(2));
+  
+  return totals;
+};
+
+const calculateSalesProductTotals = (salesList: SettlementSale[]) => {
+  const totals: Record<string, number> = {};
+  salesList.forEach(s => {
+    const name = s.item;
+    totals[name] = (totals[name] || 0) + s.qty;
+  });
+  return totals;
+};
+
+const valorPorExtenso = (valor: number): string => {
+  if (valor <= 0) return 'zero reais';
+  
+  const unidades = ['', 'um', 'dois', 'três', 'quatro', 'cinco', 'seis', 'sete', 'oito', 'nove'];
+  const dezenas = ['', 'dez', 'vinte', 'trinta', 'quarenta', 'cinquenta', 'sessenta', 'setenta', 'oitenta', 'noventa'];
+  const dezoito = ['dez', 'onze', 'doze', 'treze', 'quatorze', 'quinze', 'dezesseis', 'dezessete', 'dezoito', 'dezenove'];
+  const centenas = ['', 'cento', 'duzentos', 'trezentos', 'quatrocentos', 'quinhentos', 'seiscentos', 'setecentos', 'oitocentos', 'novecentos'];
+  
+  const converterMenorQueMil = (n: number): string => {
+    if (n === 0) return '';
+    if (n === 100) return 'cem';
+    
+    let result = '';
+    const c = Math.floor(n / 100);
+    const d = Math.floor((n % 100) / 10);
+    const u = n % 10;
+    
+    if (c > 0) {
+      result += centenas[c];
+    }
+    
+    if (d > 0 || u > 0) {
+      if (result !== '') result += ' e ';
+      if (d === 1) {
+        result += dezoito[u];
+      } else {
+        if (d > 1) {
+          result += dezenas[d];
+          if (u > 0) result += ' e ' + unidades[u];
+        } else if (u > 0) {
+          result += unidades[u];
+        }
+      }
+    }
+    return result;
+  };
+
+  const inteiro = Math.floor(valor);
+  const centavos = Math.round((valor - inteiro) * 100);
+  
+  let textoReais = '';
+  if (inteiro > 0) {
+    if (inteiro < 1000) {
+      textoReais = converterMenorQueMil(inteiro);
+    } else {
+      const mil = Math.floor(inteiro / 1000);
+      const resto = inteiro % 1000;
+      
+      const textoMil = mil === 1 ? 'mil' : converterMenorQueMil(mil) + ' mil';
+      const textoResto = converterMenorQueMil(resto);
+      
+      textoReais = textoMil + (textoResto !== '' ? ' e ' + textoResto : '');
+    }
+    textoReais += inteiro === 1 ? ' real' : ' reais';
+  }
+  
+  let textoCentavos = '';
+  if (centavos > 0) {
+    if (centavos < 10) {
+      textoCentavos = unidades[centavos];
+    } else if (centavos < 20) {
+      textoCentavos = dezoito[centavos - 10];
+    } else {
+      const d = Math.floor(centavos / 10);
+      const u = centavos % 10;
+      textoCentavos = dezenas[d] + (u > 0 ? ' e ' + unidades[u] : '');
+    }
+    textoCentavos += centavos === 1 ? ' centavo' : ' centavos';
+  }
+  
+  if (textoReais !== '' && textoCentavos !== '') {
+    return textoReais + ' e ' + textoCentavos;
+  }
+  return textoReais || textoCentavos || 'zero reais';
+};
+
+// Robust helper to parse Brazilian currency and number formats
+const parseAmountString = (amountStr: string): number => {
+  if (!amountStr) return 0;
+  
+  let clean = amountStr.replace(/[R$\s]/g, '').trim();
+  
+  // Check if it has both dots and commas (e.g. 1.234,56 or 1,234.56)
+  if (clean.includes('.') && clean.includes(',')) {
+    const dotIdx = clean.indexOf('.');
+    const commaIdx = clean.indexOf(',');
+    if (dotIdx < commaIdx) {
+      // Brazilian format: 1.234,56
+      clean = clean.replace(/\./g, '').replace(',', '.');
+    } else {
+      // US format: 1,234.56
+      clean = clean.replace(/,/g, '');
+    }
+  } else if (clean.includes(',')) {
+    // Only comma (e.g. 1234,56)
+    clean = clean.replace(',', '.');
+  }
+  
+  // Check for trailing or leading '-' or 'D' (debt) / 'C' (credit)
+  let isNegative = false;
+  if (clean.startsWith('-') || clean.endsWith('-')) {
+    isNegative = true;
+    clean = clean.replace('-', '');
+  }
+  if (clean.toUpperCase().endsWith('D')) {
+    isNegative = true;
+    clean = clean.substring(0, clean.length - 1).trim();
+  }
+  if (clean.toUpperCase().endsWith('C')) {
+    isNegative = false;
+    clean = clean.substring(0, clean.length - 1).trim();
+  }
+  
+  const val = parseFloat(clean);
+  if (isNaN(val)) return 0;
+  return isNegative ? -Math.abs(val) : val;
+};
+
+// OFX Statement Parser
+const parseOFX = (text: string, userUnit: string): BankTransaction[] => {
+  const transactions: BankTransaction[] = [];
+  const stmttrnParts = text.split(/<STMTTRN>/i);
+  
+  for (let i = 1; i < stmttrnParts.length; i++) {
+    const part = stmttrnParts[i].split(/<\/STMTTRN>/i)[0];
+    
+    const getTagValue = (tagName: string): string => {
+      const regex = new RegExp(`<${tagName}>([^<\r\n]+)`, 'i');
+      const match = part.match(regex);
+      return match ? match[1].trim() : '';
+    };
+
+    const trntype = getTagValue('TRNTYPE');
+    const dtposted = getTagValue('DTPOSTED');
+    const trnamtStr = getTagValue('TRNAMT');
+    const fitid = getTagValue('FITID') || getTagValue('CHECKNUM') || getTagValue('REFNUM');
+    let memo = getTagValue('MEMO') || getTagValue('NAME');
+    
+    if (!memo) {
+      memo = "RECEBIMENTO";
+    }
+
+    const amount = parseAmountString(trnamtStr);
+    
+    let dateStr = new Date().toISOString().split('T')[0];
+    if (dtposted && dtposted.trim().length >= 8) {
+      const cleanDt = dtposted.trim();
+      const y = cleanDt.substring(0, 4);
+      const m = cleanDt.substring(4, 6);
+      const d = cleanDt.substring(6, 8);
+      dateStr = `${y}-${m}-${d}`;
+    }
+
+    const isCredit = trntype.toUpperCase() === 'CREDIT' || amount > 0;
+    
+    if (isCredit) {
+      const absAmount = Math.abs(amount);
+      if (absAmount > 0) {
+        const uppercaseMemo = memo.toUpperCase();
+        const isPixOrTransf = 
+          uppercaseMemo.includes('PIX') ||
+          uppercaseMemo.includes('TRANSF') ||
+          uppercaseMemo.includes('TRANSFER') ||
+          uppercaseMemo.includes('TRF') ||
+          uppercaseMemo.includes('TED') ||
+          uppercaseMemo.includes('DOC') ||
+          uppercaseMemo.includes('TEF') ||
+          uppercaseMemo.includes('CRED') ||
+          uppercaseMemo.includes('RECEB') ||
+          uppercaseMemo.includes('ENTRADA') ||
+          uppercaseMemo.includes('DEP') ||
+          uppercaseMemo.includes('PAG') ||
+          uppercaseMemo.includes('BOLETO') ||
+          uppercaseMemo.includes('COB') ||
+          uppercaseMemo.includes('DINHEIRO') ||
+          uppercaseMemo.includes('RECONCIL') ||
+          (!uppercaseMemo.includes('TARIFA') && 
+           !uppercaseMemo.includes('SAQUE') && 
+           !uppercaseMemo.includes('APLIC') && 
+           !uppercaseMemo.includes('JUROS') && 
+           !uppercaseMemo.includes('IOF'));
+
+        if (isPixOrTransf) {
+          transactions.push({
+            id: 'tx-' + Math.random().toString(36).substr(2, 9),
+            date: dateStr,
+            description: memo,
+            amount: absAmount,
+            documentRef: fitid || `OFX-${Math.floor(Math.random() * 1000000)}`,
+            isReconciled: false,
+            importedAt: new Date().toISOString(),
+            unit: (userUnit as 'matriz' | 'filial') || 'matriz'
+          });
+        }
+      }
+    }
+  }
+  return transactions;
+};
+
+// CSV or TXT Parser
+const parseCSVOrTXT = (text: string, userUnit: string): BankTransaction[] => {
+  const transactions: BankTransaction[] = [];
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+  if (lines.length === 0) return [];
+
+  // 1. Detect delimiter
+  let delimiter = ';';
+  let semicolonCount = 0;
+  let tabCount = 0;
+  let commaCount = 0;
+  
+  lines.slice(0, 10).forEach(line => {
+    semicolonCount += (line.match(/;/g) || []).length;
+    tabCount += (line.match(/\t/g) || []).length;
+    commaCount += (line.match(/,/g) || []).length;
+  });
+  
+  if (tabCount > semicolonCount && tabCount > commaCount) {
+    delimiter = '\t';
+  } else if (commaCount > semicolonCount && commaCount > tabCount) {
+    if (semicolonCount > 0) {
+      delimiter = ';';
+    } else {
+      delimiter = ',';
+    }
+  } else {
+    delimiter = ';';
+  }
+
+  if (semicolonCount === 0 && tabCount === 0 && commaCount === 0) {
+    delimiter = ' ';
+  }
+
+  const splitLine = (line: string, delim: string): string[] => {
+    let cols: string[] = [];
+    if (delim === '\t') {
+      cols = line.split('\t');
+    } else if (delim === ';') {
+      cols = line.split(';');
+    } else if (delim === ',') {
+      cols = line.split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/);
+    } else {
+      cols = line.split(/\s{2,}|\t/);
+    }
+    return cols.map(c => c.replace(/^["']|["']$/g, '').trim());
+  };
+
+  // 2. Identify Column Indices
+  let dateColIndex = -1;
+  let descColIndex = -1;
+  let amountColIndex = -1;
+  let refColIndex = -1;
+  let headerIndex = -1;
+
+  const headerTermsDate = ['DATA', 'DATE', 'DT', 'MOVIMENTACAO', 'MOVIMENTAÇÃO', 'DIA'];
+  const headerTermsDesc = ['DESC', 'HIST', 'MEMO', 'DETALHE', 'OPERACAO', 'OPERAÇÃO', 'TRANSACAO', 'TRANSAÇÃO', 'DESCRICAO', 'DESCRIÇÃO'];
+  const headerTermsAmount = ['VALOR', 'AMOUNT', 'VAL', 'LANCAMENTO', 'LANÇAMENTO', 'CREDITO', 'CRÉDITO', 'ENTRADA', 'RECEBIDO', 'SALDO'];
+  const headerTermsRef = ['REF', 'DOC', 'FITID', 'CONTROLE', 'NÚMERO', 'NUMERO', 'ID', 'CONCILIAÇÃO'];
+
+  for (let i = 0; i < Math.min(15, lines.length); i++) {
+    const cols = splitLine(lines[i], delimiter);
+    let foundDate = -1;
+    let foundDesc = -1;
+    let foundAmount = -1;
+    let foundRef = -1;
+
+    cols.forEach((col, idx) => {
+      const uc = col.toUpperCase();
+      if (headerTermsDate.some(term => uc === term || uc.includes(term))) foundDate = idx;
+      if (headerTermsDesc.some(term => uc === term || uc.includes(term))) foundDesc = idx;
+      if (headerTermsAmount.some(term => uc === term || uc.includes(term))) {
+        if (uc !== 'SALDO') {
+          foundAmount = idx;
+        } else if (foundAmount === -1) {
+          foundAmount = idx;
+        }
+      }
+      if (headerTermsRef.some(term => uc === term || uc.includes(term))) foundRef = idx;
+    });
+
+    if (foundDate !== -1 && foundAmount !== -1) {
+      headerIndex = i;
+      dateColIndex = foundDate;
+      amountColIndex = foundAmount;
+      if (foundDesc !== -1) {
+        descColIndex = foundDesc;
+      } else {
+        descColIndex = cols.findIndex((_, idx) => idx !== foundDate && idx !== foundAmount);
+      }
+      refColIndex = foundRef !== -1 ? foundRef : cols.findIndex((_, idx) => idx !== foundDate && idx !== foundAmount && idx !== descColIndex);
+      break;
+    }
+  }
+
+  // 3. Guess Column Indices if No Header found
+  if (headerIndex === -1) {
+    for (let i = 0; i < Math.min(15, lines.length); i++) {
+      const cols = splitLine(lines[i], delimiter);
+      if (cols.length >= 2) {
+        let dateIdx = -1;
+        let amountIdx = -1;
+
+        cols.forEach((col, idx) => {
+          if (/\d{2}[\/\-]\d{2}[\/\-]\d{2,4}/.test(col) || /^\d{4}-\d{2}-\d{2}$/.test(col)) {
+            dateIdx = idx;
+          }
+          const cleanVal = col.replace(/[R$\s]/g, '').replace(',', '.');
+          const p = parseFloat(cleanVal);
+          if (!isNaN(p) && p !== 0 && !/\d{2}[\/\-]\d{2}[\/\-]\d{2,4}/.test(col)) {
+            amountIdx = idx;
+          }
+        });
+
+        if (dateIdx !== -1 && amountIdx !== -1) {
+          dateColIndex = dateIdx;
+          amountColIndex = amountIdx;
+          descColIndex = cols.findIndex((col, idx) => idx !== dateIdx && idx !== amountIdx && /[a-zA-Z]/.test(col));
+          if (descColIndex === -1) {
+            descColIndex = cols.findIndex((_, idx) => idx !== dateIdx && idx !== amountIdx);
+          }
+          refColIndex = cols.findIndex((_, idx) => idx !== dateIdx && idx !== amountIdx && idx !== descColIndex);
+          headerIndex = i - 1;
+          break;
+        }
+      }
+    }
+  }
+
+  if (dateColIndex === -1) dateColIndex = 0;
+  if (descColIndex === -1) descColIndex = 1;
+  if (amountColIndex === -1) amountColIndex = 2;
+  if (refColIndex === -1) refColIndex = 3;
+
+  const startRowIndex = headerIndex !== -1 ? headerIndex + 1 : 0;
+  for (let i = startRowIndex; i < lines.length; i++) {
+    const line = lines[i];
+    const cols = splitLine(line, delimiter);
+    if (cols.length <= Math.max(dateColIndex, amountColIndex)) continue;
+
+    const rawDate = cols[dateColIndex];
+    const rawDesc = cols[descColIndex] || "RECEBIMENTO";
+    const rawAmount = cols[amountColIndex];
+    const rawRef = cols[refColIndex] || '';
+
+    if (!rawDate || (!/\d{2}[\/\-]\d{2}/.test(rawDate) && !/^\d{4}-\d{2}-\d{2}$/.test(rawDate))) {
+      continue;
+    }
+
+    const dateStr = parseDateString(rawDate);
+    const amount = parseAmountString(rawAmount);
+    const ref = rawRef.trim() || `DOC-${Math.floor(Math.random() * 1000000)}`;
+
+    if (amount > 0) {
+      const uppercaseDesc = rawDesc.toUpperCase();
+      const isPixOrTransf = 
+        uppercaseDesc.includes('PIX') ||
+        uppercaseDesc.includes('TRANSF') ||
+        uppercaseDesc.includes('TRANSFER') ||
+        uppercaseDesc.includes('TRF') ||
+        uppercaseDesc.includes('TED') ||
+        uppercaseDesc.includes('DOC') ||
+        uppercaseDesc.includes('TEF') ||
+        uppercaseDesc.includes('CRED') ||
+        uppercaseDesc.includes('RECEB') ||
+        uppercaseDesc.includes('ENTRADA') ||
+        uppercaseDesc.includes('DEP') ||
+        uppercaseDesc.includes('PAG') ||
+        uppercaseDesc.includes('BOLETO') ||
+        uppercaseDesc.includes('COB') ||
+        uppercaseDesc.includes('DINHEIRO') ||
+        uppercaseDesc.includes('RECONCIL') ||
+        (!uppercaseDesc.includes('TARIFA') && 
+         !uppercaseDesc.includes('SAQUE') && 
+         !uppercaseDesc.includes('APLIC') && 
+         !uppercaseDesc.includes('JUROS') && 
+         !uppercaseDesc.includes('IOF'));
+
+      if (isPixOrTransf) {
+        transactions.push({
+          id: 'tx-' + Math.random().toString(36).substr(2, 9),
+          date: dateStr,
+          description: rawDesc,
+          amount: amount,
+          documentRef: ref,
+          isReconciled: false,
+          importedAt: new Date().toISOString(),
+          unit: (userUnit as 'matriz' | 'filial') || 'matriz'
+        });
+      }
+    }
+  }
+
+  return transactions;
+};
+
+export const PrestacaoContas: React.FC = () => {
+  const { 
+    movements, 
+    registeredDrivers, 
+    registeredVehicles,
+    registeredClients = [],
+    driverSettlements = [],
+    bankTransactions = [],
+    addDriverSettlement,
+    updateDriverSettlement,
+    deleteDriverSettlement,
+    importBankTransactions,
+    reconcileDriverSettlementWithPix,
+    unreconcileDriverSettlement,
+    removeBankTransaction,
+    manuallyReconcileBankTransaction,
+    undoManualReconciliation,
+    currentUser,
+    updateMovementDetails,
+    customAvariaTypes = []
+  } = useStore();
+
+  const [txToDelete, setTxToDelete] = useState<BankTransaction | null>(null);
+
+  const [activeSubTab, setActiveSubTab] = useState<'pending_movements' | 'history' | 'bank_reconciliation'>('pending_movements');
+  const [selectedMovement, setSelectedMovement] = useState<Movement | null>(null);
+
+  // Cash Advance State
+  const [cashAdvanceModalOpen, setCashAdvanceModalOpen] = useState(false);
+  const [cashAdvanceMovement, setCashAdvanceMovement] = useState<Movement | null>(null);
+  const [cashAdvanceValue, setCashAdvanceValue] = useState<string>('');
+  const [cashAdvanceReason, setCashAdvanceReason] = useState<string>('');
+  const [cashAdvanceReceipt, setCashAdvanceReceipt] = useState<any | null>(null);
+  
+  // Settlement Form State
+  const [sales, setSales] = useState<SettlementSale[]>([]);
+  const [expenses, setExpenses] = useState<SettlementExpense[]>([]);
+  const [suprimentos, setSuprimentos] = useState<SettlementSuprimento[]>([]);
+  const [newSuprimentoItem, setNewSuprimentoItem] = useState('');
+  const [newSuprimentoValue, setNewSuprimentoValue] = useState(0);
+  const [payments, setPayments] = useState({
+    dinheiro: 0,
+    pix: 0,
+    boleto: 0,
+    cheque: 0,
+    outros: 0
+  });
+  const [avariaQty, setAvariaQty] = useState(0);
+  const [avariaUnitValue, setAvariaUnitValue] = useState(0);
+  const [dateArrival, setDateArrival] = useState('');
+  const [observation, setObservation] = useState('');
+  const [commissionPercent, setCommissionPercent] = useState(8);
+  const [formError, setFormError] = useState('');
+  const [suggestedWaterQty, setSuggestedWaterQty] = useState(0);
+  const [suggestedVasilhameQty, setSuggestedVasilhameQty] = useState(0);
+  const [vendaVasilhameQty, setVendaVasilhameQty] = useState(0);
+  const [comodatoVasilhameQty, setComodatoVasilhameQty] = useState(0);
+
+  // Sync venda de vasilhame and comodato de vasilhame whenever sales change to deduct from shortage
+  useEffect(() => {
+    const vasilhameSalesQty = sales
+      .filter(s => s.item.toLowerCase().includes('vasilhame') && !s.item.toLowerCase().includes('comodato') && !s.item.toLowerCase().includes('retorno'))
+      .reduce((sum, s) => sum + s.qty, 0);
+    
+    setVendaVasilhameQty(vasilhameSalesQty);
+
+    const comodatoSalesQty = sales
+      .filter(s => s.item.toLowerCase().includes('comodato'))
+      .reduce((sum, s) => sum + s.qty, 0);
+
+    setComodatoVasilhameQty(comodatoSalesQty);
+  }, [sales]);
+  const [selectedPixTxIds, setSelectedPixTxIds] = useState<string[]>([]);
+
+  // Manual sale entry states (similar to driver's cart workflow)
+  const [manualSaleClientName, setManualSaleClientName] = useState('');
+  const [showManualSaleClientDropdown, setShowManualSaleClientDropdown] = useState(false);
+  const [manualSaleProductType, setManualSaleProductType] = useState<'agua' | 'vasilhame' | 'bonificacao' | 'comodato'>('agua');
+  const [manualSaleQty, setManualSaleQty] = useState<number | ''>('');
+  const [manualSaleUnitPrice, setManualSaleUnitPrice] = useState<number | ''>('');
+  const [manualSaleCart, setManualSaleCart] = useState<Array<{ productType: 'agua' | 'vasilhame' | 'bonificacao' | 'comodato'; qty: number; unitPrice: number }>>([]);
+
+  const [manualPayDinheiro, setManualPayDinheiro] = useState<string>('');
+  const [manualPayPix, setManualPayPix] = useState<string>('');
+  const [manualPayBoleto, setManualPayBoleto] = useState<string>('');
+  const [manualPayCheque, setManualPayCheque] = useState<string>('');
+  const [manualPayOutros, setManualPayOutros] = useState<string>('');
+  const [manualPayOutrosNote, setManualPayOutrosNote] = useState<string>('');
+
+  const getManualProductDisplayName = (type: string) => {
+    switch (type) {
+      case 'agua': return 'Água 20 Lts';
+      case 'vasilhame': return 'Vasilhame';
+      case 'bonificacao': return 'Bonificação de Água';
+      case 'comodato': return 'Comodato de Vasilhame';
+      default: return type;
+    }
+  };
+
+  // Bank Reconciliation States
+  const [txToManualReconcile, setTxToManualReconcile] = useState<BankTransaction | null>(null);
+  const [manualReconcileReason, setManualReconcileReason] = useState('');
+
+  // Expense inputs state
+  const [newExpenseItem, setNewExpenseItem] = useState('');
+  const [newExpenseValue, setNewExpenseValue] = useState(0);
+
+  // File Upload Ref
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [importSuccessMessage, setImportSuccessMessage] = useState('');
+
+  // Viewing detail Modal state
+  const [viewingSettlement, setViewingSettlement] = useState<DriverSettlement | null>(null);
+
+  // Reconciling Modal state
+  const [reconcilingSettlement, setReconcilingSettlement] = useState<DriverSettlement | null>(null);
+  const [selectedTxIds, setSelectedTxIds] = useState<string[]>([]);
+  const [searchPixQuery, setSearchPixQuery] = useState('');
+  const [searchPixInActiveSettlementQuery, setSearchPixInActiveSettlementQuery] = useState('');
+  const [showQtyWarningModal, setShowQtyWarningModal] = useState(false);
+
+  // Filters for completed settlements
+  const [searchSettlementQuery, setSearchSettlementQuery] = useState('');
+  const [filterReconciliation, setFilterReconciliation] = useState<'all' | 'reconciled' | 'pending'>('all');
+  const [filterSettlementStartDate, setFilterSettlementStartDate] = useState('');
+  const [filterSettlementEndDate, setFilterSettlementEndDate] = useState('');
+  const [filterSettlementDriver, setFilterSettlementDriver] = useState('');
+  const [filterSettlementVehicle, setFilterSettlementVehicle] = useState('');
+
+  // Search query for bank transactions tab
+  const [searchBankQuery, setSearchBankQuery] = useState('');
+  const [filterBankReconciliation, setFilterBankReconciliation] = useState<'all' | 'reconciled' | 'pending'>('all');
+
+  // Filter completed settlements
+  const filteredCompletedSettlements = React.useMemo(() => {
+    return driverSettlements.filter(ds => {
+      if (ds.status !== 'completed') return false;
+
+      // Filter by specific driver if selected
+      if (filterSettlementDriver && ds.driverName !== filterSettlementDriver) {
+        return false;
+      }
+
+      // Filter by specific vehicle if selected
+      if (filterSettlementVehicle && ds.plate !== filterSettlementVehicle) {
+        return false;
+      }
+
+      // Filter by start and end date if selected
+      const checkDate = ds.dateSettlement || (ds.dateArrival ? ds.dateArrival.split('T')[0] : '');
+      if (filterSettlementStartDate && checkDate < filterSettlementStartDate) {
+        return false;
+      }
+      if (filterSettlementEndDate && checkDate > filterSettlementEndDate) {
+        return false;
+      }
+
+      const query = searchSettlementQuery.toLowerCase().trim();
+      if (!query) {
+        if (filterReconciliation === 'reconciled') {
+          return ds.isReconciled || (ds.payments?.pix || 0) === 0;
+        } else if (filterReconciliation === 'pending') {
+          return !ds.isReconciled && (ds.payments?.pix || 0) > 0;
+        }
+        return true;
+      }
+
+      const matchesName = ds.driverName.toLowerCase().includes(query);
+      const matchesPlate = ds.plate.toLowerCase().includes(query);
+      const matchesId = ds.id.toLowerCase().includes(query);
+      
+      // Search by values (e.g. commission, total to receive, PIX payment)
+      const matchesValue = 
+        ds.totalToReceive.toString().includes(query) ||
+        ds.totalToReceive.toFixed(2).includes(query) ||
+        ds.totalToReceive.toFixed(2).replace('.', ',').includes(query) ||
+        ds.finalCommission.toString().includes(query) ||
+        ds.finalCommission.toFixed(2).includes(query) ||
+        ds.finalCommission.toFixed(2).replace('.', ',').includes(query) ||
+        (ds.payments && (
+          (ds.payments.dinheiro || 0).toString().includes(query) ||
+          (ds.payments.dinheiro || 0).toFixed(2).includes(query) ||
+          (ds.payments.dinheiro || 0).toFixed(2).replace('.', ',').includes(query) ||
+          (ds.payments.pix || 0).toString().includes(query) ||
+          (ds.payments.pix || 0).toFixed(2).includes(query) ||
+          (ds.payments.pix || 0).toFixed(2).replace('.', ',').includes(query)
+        ));
+
+      // Search by dates
+      const matchesDate = 
+        ds.dateArrival.includes(query) || 
+        ds.dateSettlement.includes(query) || (() => {
+          const [y, m, d] = ds.dateArrival.split('T')[0].split('-');
+          if (y && m && d) {
+            const brDate = `${d}/${m}/${y}`;
+            const brDateShort = `${d}/${m}`;
+            return brDate.includes(query) || brDateShort.includes(query);
+          }
+          return false;
+        })() || (() => {
+          const [y, m, d] = ds.dateSettlement.split('-');
+          if (y && m && d) {
+            const brDate = `${d}/${m}/${y}`;
+            const brDateShort = `${d}/${m}`;
+            return brDate.includes(query) || brDateShort.includes(query);
+          }
+          return false;
+        })();
+
+      const matchesSearch = matchesName || matchesPlate || matchesId || matchesValue || matchesDate;
+      
+      if (filterReconciliation === 'reconciled') {
+        return matchesSearch && (ds.isReconciled || (ds.payments?.pix || 0) === 0);
+      } else if (filterReconciliation === 'pending') {
+        return matchesSearch && (!ds.isReconciled && (ds.payments?.pix || 0) > 0);
+      }
+      return matchesSearch;
+    });
+  }, [driverSettlements, searchSettlementQuery, filterReconciliation, filterSettlementStartDate, filterSettlementEndDate, filterSettlementDriver, filterSettlementVehicle]);
+
+  const uniqueDriversForHistory = React.useMemo(() => {
+    const completed = driverSettlements.filter(ds => ds.status === 'completed');
+    const names = completed.map(ds => ds.driverName);
+    return Array.from(new Set(names)).sort();
+  }, [driverSettlements]);
+
+  const uniqueVehiclesForHistory = React.useMemo(() => {
+    const completed = driverSettlements.filter(ds => ds.status === 'completed');
+    const plates = completed.map(ds => ds.plate);
+    return Array.from(new Set(plates)).sort();
+  }, [driverSettlements]);
+
+  const cashierSummary = React.useMemo(() => {
+    // Only completed settlements
+    const completed = filteredCompletedSettlements;
+    
+    let totalSalesDinheiro = 0;
+    let totalSalesPix = 0;
+    let totalSalesBoleto = 0;
+    let totalSalesCheque = 0;
+    let totalSalesOutros = 0;
+    
+    let totalExpenses = 0;
+    let totalSuprimentos = 0;
+    let totalBasicCommissions = 0;
+    let totalAvariaDeductions = 0;
+    let totalShortageDeductions = 0;
+    let totalFinalCommissions = 0;
+
+    completed.forEach(ds => {
+      const p = ds.payments || { dinheiro: 0, pix: 0, boleto: 0, cheque: 0, outros: 0 };
+      
+      totalSalesPix += p.pix || 0;
+      totalSalesBoleto += p.boleto || 0;
+      totalSalesCheque += p.cheque || 0;
+      totalSalesOutros += p.outros || 0;
+
+      // Sum expenses (which are in cash/dinheiro)
+      let dsExpenses = 0;
+      (ds.expenses || []).forEach(e => {
+        dsExpenses += e.value;
+      });
+      totalExpenses += dsExpenses;
+
+      // Sum suprimentos (which are in cash/dinheiro)
+      let dsSuprimentos = 0;
+      (ds.suprimentos || []).forEach(s => {
+        dsSuprimentos += s.value;
+      });
+      totalSuprimentos += dsSuprimentos;
+      
+      // Sum commissions and deductions
+      totalBasicCommissions += ds.basicCommission || 0;
+      totalAvariaDeductions += ds.avariaDeduction || 0;
+      totalShortageDeductions += ds.shortageDeduction || 0;
+      totalFinalCommissions += ds.finalCommission || 0;
+      
+      // Since ds.payments.dinheiro is the net cash delivered,
+      // The gross cash sales = delivered cash + expenses paid in cash + shortage difference (if any)
+      // Actually, if we just want totalSalesDinheiro to balance out:
+      // totalSales = totalToReceive + dsExpenses
+      // totalSales is also totalSalesDinheiro + totalSalesPix + ...
+      // So totalSalesDinheiro = totalSales - totalSalesPix - ...
+      const totalSales = (ds.sales || []).reduce((acc, curr) => acc + (curr.qty * curr.value), 0);
+      const otherSales = (p.pix || 0) + (p.boleto || 0) + (p.cheque || 0) + (p.outros || 0);
+      
+      // Calculate cash sales by subtracting other payment methods from total sales
+      // This is mathematically perfect and ignores line-item payment methods
+      totalSalesDinheiro += Math.max(0, totalSales - otherSales);
+    });
+
+    const netDinheiro = totalSalesDinheiro - totalExpenses + totalSuprimentos - totalFinalCommissions - totalShortageDeductions;
+    const totalCaixaGeral = netDinheiro + totalSalesPix + totalSalesBoleto + totalSalesCheque + totalSalesOutros;
+
+    return {
+      totalSalesDinheiro,
+      totalSalesPix,
+      totalSalesBoleto,
+      totalSalesCheque,
+      totalSalesOutros,
+      totalExpenses,
+      totalSuprimentos,
+      totalBasicCommissions,
+      totalAvariaDeductions,
+      totalShortageDeductions,
+      totalFinalCommissions,
+      netDinheiro,
+      totalCaixaGeral,
+      completedCount: completed.length
+    };
+  }, [filteredCompletedSettlements]);
+
+  // 1. FILTER MOVEMENTS PENDING SETTLEMENT
+
+  // Find return entry movement for a given departure (saida) movement
+  const getReturnMovement = React.useCallback((mov: Movement) => {
+    if (mov.type === 'entrada') return mov; // If it's already an entrada, it is its own return!
+    
+    // Find subsequent movements of the same vehicle that started after this departure
+    const refTime = new Date(mov.exitTimestamp || mov.timestamp).getTime();
+    const cleanPlate = mov.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+    const returns = movements.filter(m => 
+      m.id !== mov.id &&
+      m.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase() === cleanPlate && 
+      new Date(m.entryTimestamp || m.timestamp).getTime() > refTime
+    );
+    
+    if (returns.length === 0) return null;
+    returns.sort((a, b) => new Date(a.entryTimestamp || a.timestamp).getTime() - new Date(b.entryTimestamp || b.timestamp).getTime());
+    
+    const candidate = returns[0];
+    const candidateTime = new Date(candidate.entryTimestamp || candidate.timestamp).getTime();
+    
+    // Check if there is another 'saida' movement of the same vehicle between mov and candidate
+    const hasIntermediateSaida = movements.some(m => 
+      m.type === 'saida' &&
+      m.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase() === cleanPlate &&
+      m.id !== mov.id &&
+      m.id !== candidate.id &&
+      (() => {
+        const t = new Date(m.exitTimestamp || m.timestamp).getTime();
+        return t > refTime && t < candidateTime;
+      })()
+    );
+    
+    if (hasIntermediateSaida) return null;
+    
+    return candidate;
+  }, [movements]);
+
+  // Find departure (saida) movement for a given return (entrada) movement
+  const getDepartureMovement = React.useCallback((entrada: Movement) => {
+    if (entrada.type === 'saida') return entrada; // If it's already a departure, it is its own departure!
+    
+    // Find prior movements of the same vehicle that started before this arrival
+    const refTime = new Date(entrada.entryTimestamp || entrada.timestamp).getTime();
+    const cleanPlate = entrada.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+    const departures = movements.filter(m => 
+      m.type === 'saida' &&
+      m.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase() === cleanPlate && 
+      m.id !== entrada.id &&
+      new Date(m.exitTimestamp || m.timestamp).getTime() < refTime
+    );
+    
+    if (departures.length === 0) return null;
+    departures.sort((a, b) => new Date(b.exitTimestamp || b.timestamp).getTime() - new Date(a.exitTimestamp || a.timestamp).getTime());
+    
+    const candidate = departures[0];
+    const candidateTime = new Date(candidate.exitTimestamp || candidate.timestamp).getTime();
+    
+    // Check if there is another 'entrada' movement of the same vehicle between candidate and entrada
+    const hasIntermediateEntrada = movements.some(m => 
+      m.type === 'entrada' &&
+      m.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase() === cleanPlate &&
+      m.id !== entrada.id &&
+      m.id !== candidate.id &&
+      (() => {
+        const t = new Date(m.entryTimestamp || m.timestamp).getTime();
+        return t > candidateTime && t < refTime;
+      })()
+    );
+    
+    if (hasIntermediateEntrada) return null;
+    
+    return candidate; // Return the latest departure before this entry
+  }, [movements]);
+
+  const isProprioMovement = React.useCallback((m: Movement) => {
+    if (m.ownerType === 'proprio') return true;
+    const cleanPlate = m.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+    const matchedVeh = registeredVehicles.find(v => v.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase() === cleanPlate);
+    if (matchedVeh && matchedVeh.ownerType === 'proprio') return true;
+    const matchedDrv = registeredDrivers.find(d => d.name.toLowerCase().trim() === m.driver.toLowerCase().trim());
+    if (matchedDrv && matchedDrv.driverType === 'interno') return true;
+    return false;
+  }, [registeredVehicles, registeredDrivers]);
+
+  const movementsPendingSettlement = React.useMemo(() => {
+    // Find all 'saida' movements (all trips need settlement regardless of owner)
+    const ownSaidas = movements.filter(m => m.type === 'saida');
+    
+    const pending: Movement[] = [];
+    
+    ownSaidas.forEach(saida => {
+      // 1. Check if this saida is already settled (checking both raw and prefixed IDs)
+      const isSettled = driverSettlements.some(ds => {
+        if (ds.status !== 'completed') return false;
+        return ds.movementId === saida.id || ds.movementId === `settled-${saida.id}`;
+      });
+      if (isSettled) return;
+
+      // 2. Check if there is a subsequent return movement for this plate
+      const retMov = getReturnMovement(saida);
+      // We no longer skip if !retMov, so it shows up as "Não Retornado" and locked.
+
+      // Add to pending
+      pending.push(saida);
+    });
+
+    // Return them in reverse chronological order (newest first)
+    return pending.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  }, [movements, driverSettlements, getReturnMovement]);
+
+  const activeTripsOnRoad = React.useMemo(() => {
+    // Find all 'saida' movements
+    const salidas = movements.filter(m => m.type === 'saida');
+    
+    return salidas.filter(saida => {
+      // 1. Filter out if this trip is already settled (checking both raw and prefixed IDs)
+      const isSettled = driverSettlements.some(ds => {
+        if (ds.status !== 'completed') return false;
+        return ds.movementId === saida.id || ds.movementId === `settled-${saida.id}`;
+      });
+      if (isSettled) return false;
+
+      // 2. Check if it has returned (any subsequent entry or departure of the same plate)
+      const hasReturned = movements.some(m => {
+        if (m.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase() !== saida.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase() || m.id === saida.id) {
+          return false;
+        }
+        
+        // It must be subsequent to the departure
+        const isSubsequent = new Date(m.timestamp).getTime() > new Date(saida.exitTimestamp || saida.timestamp).getTime();
+        if (!isSubsequent) return false;
+
+        // If it registered entry (entrada) or a newer exit (saida), the trip is completed
+        return m.type === 'entrada' || m.type === 'saida';
+      });
+
+      return !hasReturned;
+    }).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  }, [movements, driverSettlements]);
+
+  const selectedReturnMovement = React.useMemo(() => {
+    if (!selectedMovement) return null;
+    return getReturnMovement(selectedMovement);
+  }, [selectedMovement, movements]);
+
+  const resolvedProductionControl = React.useMemo(() => {
+    if (!selectedMovement) return null;
+    const baseControl = selectedMovement.productionControl || {} as ProductionControl;
+    const returnControl = selectedReturnMovement?.productionControl || {} as ProductionControl;
+    return {
+      ...baseControl,
+      expectedDischargeQty: returnControl.expectedDischargeQty ?? baseControl.totalCarregado ?? 0,
+      descarregadoQty: returnControl.descarregadoQty ?? baseControl.descarregadoQty ?? 0,
+      retornoVasilhameCheio: returnControl.retornoVasilhameCheio ?? baseControl.retornoVasilhameCheio ?? 0,
+      totalCarregado: baseControl.totalCarregado ?? returnControl.totalCarregado ?? 0,
+      avariasDescarregamento: returnControl.avariasDescarregamento || baseControl.avariasDescarregamento || [],
+      differenceReasonsBreakdown: returnControl.differenceReasonsBreakdown || baseControl.differenceReasonsBreakdown || [],
+      differenceQty: returnControl.differenceQty ?? baseControl.differenceQty ?? 0,
+    } as ProductionControl;
+  }, [selectedMovement, selectedReturnMovement]);
+
+  const groupedMobileSales = React.useMemo(() => {
+    if (!resolvedProductionControl?.mobileSales) return [];
+    
+    const groups: Record<string, {
+      saleNumber: string;
+      clientName: string;
+      timestamp?: string;
+      products: {
+        item: string;
+        productType?: string;
+        qty: number;
+        unitPrice: number;
+        totalPrice: number;
+      }[];
+      payments: {
+        dinheiro: number;
+        pix: number;
+        boleto: number;
+        cheque: number;
+        outros: number;
+      };
+      paymentMethodNote?: string;
+      totalValue: number;
+    }> = {};
+
+    resolvedProductionControl.mobileSales.forEach(s => {
+      const key = s.saleNumber || `${s.clientName || 'Cliente'}_${s.timestamp || ''}`;
+      
+      if (!groups[key]) {
+        let cleanClient = s.clientName || 'Cliente';
+        if (!s.clientName && s.item.includes(' - ')) {
+          cleanClient = s.item.split(' - ')[0];
+        }
+
+        groups[key] = {
+          saleNumber: s.saleNumber || 'N/A',
+          clientName: cleanClient,
+          timestamp: s.timestamp,
+          products: [],
+          payments: { dinheiro: 0, pix: 0, boleto: 0, cheque: 0, outros: 0 },
+          totalValue: 0,
+        };
+      }
+
+      const group = groups[key];
+      
+      let prodDisplayName = s.item;
+      if (s.item.includes(' - ')) {
+        prodDisplayName = s.item.split(' - ').slice(1).join(' - ');
+      }
+
+      const existingProd = group.products.find(p => p.item === prodDisplayName && p.unitPrice === s.value);
+      const lineQty = s.qty || 0;
+      const lineTotalValue = lineQty * (s.value || 0);
+
+      if (existingProd) {
+        existingProd.qty += lineQty;
+        existingProd.totalPrice += lineTotalValue;
+      } else {
+        group.products.push({
+          item: prodDisplayName,
+          productType: s.productType,
+          qty: lineQty,
+          unitPrice: s.value || 0,
+          totalPrice: lineTotalValue,
+        });
+      }
+
+      group.totalValue += lineTotalValue;
+
+      // Aggregate payments
+      if (s.paymentsBreakdown) {
+        group.payments.dinheiro += s.paymentsBreakdown.dinheiro || 0;
+        group.payments.pix += s.paymentsBreakdown.pix || 0;
+        group.payments.boleto += s.paymentsBreakdown.boleto || 0;
+        group.payments.cheque += s.paymentsBreakdown.cheque || 0;
+        group.payments.outros += s.paymentsBreakdown.outros || 0;
+      } else {
+        const method = s.paymentMethod || 'dinheiro';
+        const amt = lineTotalValue;
+        if (method === 'dinheiro') group.payments.dinheiro += amt;
+        else if (method === 'pix') group.payments.pix += amt;
+        else if (method === 'boleto') group.payments.boleto += amt;
+        else if (method === 'cheque') group.payments.cheque += amt;
+        else group.payments.outros += amt;
+      }
+
+      // Aggregate notes
+      if (s.paymentMethodNote) {
+        if (group.paymentMethodNote) {
+          if (!group.paymentMethodNote.includes(s.paymentMethodNote)) {
+            const existingNotes = group.paymentMethodNote.split(' | ');
+            const newNotes = s.paymentMethodNote.split(' | ');
+            const combined = Array.from(new Set([...existingNotes, ...newNotes])).join(' | ');
+            group.paymentMethodNote = combined;
+          }
+        } else {
+          group.paymentMethodNote = s.paymentMethodNote;
+        }
+      }
+    });
+
+    return Object.values(groups).map(g => {
+      g.payments.dinheiro = Number(g.payments.dinheiro.toFixed(2));
+      g.payments.pix = Number(g.payments.pix.toFixed(2));
+      g.payments.boleto = Number(g.payments.boleto.toFixed(2));
+      g.payments.cheque = Number(g.payments.cheque.toFixed(2));
+      g.payments.outros = Number(g.payments.outros.toFixed(2));
+      g.totalValue = Number(g.totalValue.toFixed(2));
+      return g;
+    });
+  }, [resolvedProductionControl?.mobileSales]);
+
+  // Calculate cargo totals
+  const totalSalesAmount = sales.reduce((acc, curr) => acc + (curr.qty * curr.value), 0);
+  const totalExpensesAmount = expenses.reduce((acc, curr) => acc + curr.value, 0);
+  const totalSuprimentosAmount = suprimentos.reduce((acc, curr) => acc + curr.value, 0);
+  // Prevent double-counting of cash advances if they are already pre-populated or added in suprimentos (starting with 'Adiantamento:')
+  const hasImportedAdvances = suprimentos.some(s => s.item.toLowerCase().startsWith('adiantamento:'));
+  const totalCashAdvances = hasImportedAdvances 
+    ? 0 
+    : (selectedMovement?.cashAdvances?.reduce((acc, adv) => acc + adv.value, 0) || 0);
+  const totalToReceive = totalSalesAmount - totalExpensesAmount + totalCashAdvances + totalSuprimentosAmount;
+  const totalDelivered = payments.dinheiro + payments.pix + payments.boleto + payments.cheque + payments.outros;
+  const difference = totalDelivered - totalToReceive;
+
+  // Commission Calculations
+  // Only water sales (items with 'água' or 'agua' in name) generate commission, not container (vasilhame) sales
+  const waterSalesAmount = sales
+    .filter(s => s.item.toLowerCase().includes('água') || s.item.toLowerCase().includes('agua') || s.item.toLowerCase().includes('bonifica'))
+    .reduce((acc, curr) => acc + (curr.qty * curr.value), 0);
+
+  const basicCommission = waterSalesAmount * (commissionPercent / 100);
+  
+  const getCalculatedMissingBottles = () => {
+    if (!selectedMovement || !resolvedProductionControl) return 0;
+    const isProprio = isProprioMovement(selectedMovement);
+    if (!isProprio) return 0;
+
+    const expected = resolvedProductionControl.expectedDischargeQty || 0;
+    if (expected <= 0) return 0;
+
+    const dry = resolvedProductionControl.descarregadoQty || 0;
+    const full = resolvedProductionControl.retornoVasilhameCheio || 0;
+    const totalUnloaded = dry + full;
+    
+    const diff = Math.max(0, expected - totalUnloaded);
+    const clientVasilhames = resolvedProductionControl.differenceReasonsBreakdown?.find(b => b.reason === 'vasilhame_cliente')?.qty || 0;
+    const comodatoVasilhames = resolvedProductionControl.differenceReasonsBreakdown?.find(b => b.reason === 'comodato')?.qty || 0;
+    
+    return diff + clientVasilhames + comodatoVasilhames;
+  };
+
+  const missingBottlesQty = selectedMovement && resolvedProductionControl
+    ? (resolvedProductionControl.differenceReasonsBreakdown?.find(b => b.reason === 'falta')?.qty || getCalculatedMissingBottles()) 
+    : 0;
+
+  const currentTargetVasilhameQty = missingBottlesQty;
+  
+  // Get driver tolerance from the selected movement's driver
+  const currentMatchingDriver = selectedMovement
+    ? registeredDrivers?.find(d => d.name.toLowerCase() === selectedMovement.driver.toLowerCase())
+    : null;
+  const currentDamageToleranceQty = currentMatchingDriver?.damageToleranceQty || 0;
+
+  const totalAvariasDescarrego = selectedMovement && resolvedProductionControl?.avariasDescarregamento
+    ? resolvedProductionControl.avariasDescarregamento
+        .filter(a => isDriverDeductibleAvaria(a.type, customAvariaTypes || []))
+        .reduce((sum, item) => sum + item.qty, 0)
+    : 0;
+
+  const avariasACobrarCalculado = Math.max(0, totalAvariasDescarrego - currentDamageToleranceQty);
+  const exceededAvariaQty = avariaQty;
+
+  const avariaDeduction = exceededAvariaQty * avariaUnitValue;
+  // If driver delivered less than expected, shortage is deducted from their commission
+  const shortageDeduction = difference < 0 ? Math.abs(difference) : 0;
+  const finalCommission = basicCommission - avariaDeduction - shortageDeduction;
+
+  const handleStartSettlement = (mov: Movement) => {
+    let baseMov = mov;
+    if (mov.type === 'entrada') {
+      const departure = getDepartureMovement(mov);
+      if (departure) {
+        baseMov = departure;
+      }
+    }
+    const retMov = getReturnMovement(baseMov);
+    setSelectedMovement(baseMov);
+    
+    const baseControl = baseMov.productionControl;
+    const returnControl = retMov?.productionControl;
+    const mergedControl = {
+      expectedDischargeQty: returnControl?.expectedDischargeQty ?? baseControl?.expectedDischargeQty ?? 0,
+      descarregadoQty: returnControl?.descarregadoQty ?? baseControl?.descarregadoQty ?? 0,
+      retornoVasilhameCheio: returnControl?.retornoVasilhameCheio ?? baseControl?.retornoVasilhameCheio ?? 0,
+      totalCarregado: baseControl?.totalCarregado ?? returnControl?.totalCarregado ?? 0,
+      avariasDescarregamento: returnControl?.avariasDescarregamento || baseControl?.avariasDescarregamento || [],
+      differenceReasonsBreakdown: returnControl?.differenceReasonsBreakdown || baseControl?.differenceReasonsBreakdown || [],
+      differenceQty: returnControl?.differenceQty ?? baseControl?.differenceQty ?? 0,
+    };
+
+    // Calculations for suggestions based on vasilhame differential
+    const expectedOut = mergedControl.totalCarregado || mergedControl.expectedDischargeQty || 0;
+    const returnedDry = mergedControl.descarregadoQty || 0;
+    const returnedFull = mergedControl.retornoVasilhameCheio || 0;
+
+    const unloadAvarias = mergedControl.avariasDescarregamento || [];
+    const vencidoCheioQty = unloadAvarias
+      .filter(a => {
+        const t = a.type.toLowerCase().trim();
+        return t.includes('vencido (cheio)') || t.includes('vencido cheio');
+      })
+      .reduce((sum, item) => sum + item.qty, 0);
+
+    const quebradoLacradoQty = unloadAvarias
+      .filter(a => {
+        const t = a.type.toLowerCase().trim();
+        return t.includes('quebrado lacrado');
+      })
+      .reduce((sum, item) => sum + item.qty, 0);
+
+    const microfuroQty = unloadAvarias
+      .filter(a => {
+        const t = a.type.toLowerCase().trim();
+        return t === 'microfuro' || t.includes('microfuro');
+      })
+      .reduce((sum, item) => sum + item.qty, 0);
+
+    const calcMissingBottlesQty = mergedControl.differenceReasonsBreakdown?.find(b => b.reason === 'falta')?.qty || (() => {
+      const isProprio = isProprioMovement(baseMov);
+      if (!isProprio) return 0;
+      const expected = mergedControl.expectedDischargeQty || 0;
+      if (expected <= 0) return 0;
+      const dry = mergedControl.descarregadoQty || 0;
+      const full = mergedControl.retornoVasilhameCheio || 0;
+      const totalUnloaded = dry + full;
+      const diff = Math.max(0, expected - totalUnloaded);
+      const clientVasilhames = mergedControl.differenceReasonsBreakdown?.find(b => b.reason === 'vasilhame_cliente')?.qty || 0;
+      const comodatoVasilhames = mergedControl.differenceReasonsBreakdown?.find(b => b.reason === 'comodato')?.qty || 0;
+      return diff + clientVasilhames + comodatoVasilhames;
+    })();
+
+    const sugeridoAgua = Math.max(0, expectedOut - returnedFull - vencidoCheioQty - quebradoLacradoQty - microfuroQty);
+    const sugeridoVasilhame = calcMissingBottlesQty;
+
+    setSuggestedWaterQty(sugeridoAgua);
+    setSuggestedVasilhameQty(sugeridoVasilhame);
+
+    const nowStr = new Date().toISOString().slice(0, 16);
+
+    const matchingDriver = registeredDrivers?.find(d => d.name.toLowerCase() === baseMov.driver.toLowerCase());
+    const tolerance = matchingDriver?.damageToleranceQty || 0;
+
+    // Check for an existing pending draft
+    const existingDraft = driverSettlements.find(ds => 
+      ds.status === 'pending' && (ds.movementId === baseMov.id || ds.movementId === `settled-${baseMov.id}`)
+    );
+
+    if (existingDraft) {
+      setSales(existingDraft.sales || []);
+      setExpenses(existingDraft.expenses || []);
+      setSuprimentos(existingDraft.suprimentos || []);
+      setPayments(existingDraft.payments || { dinheiro: 0, pix: 0, boleto: 0, cheque: 0, outros: 0 });
+      setSelectedPixTxIds(existingDraft.reconciledPixTransactionIds || (existingDraft.reconciledPixTransactionId ? [existingDraft.reconciledPixTransactionId] : []));
+      setAvariaQty(existingDraft.avarias?.qty || 0);
+      setAvariaUnitValue(existingDraft.avarias?.value || 0);
+      setVendaVasilhameQty(existingDraft.vendaVasilhameQty || 0);
+      setComodatoVasilhameQty(existingDraft.comodatoVasilhameQty || 0);
+      setObservation(existingDraft.observation || '');
+      setDateArrival(existingDraft.dateArrival || nowStr);
+      setCommissionPercent(existingDraft.commissionPercent || 8);
+      setManualSaleClientName('');
+      setManualSaleQty('');
+      setManualSaleUnitPrice('');
+      setManualSaleCart([]);
+      setManualPayDinheiro('');
+      setManualPayPix('');
+      setManualPayBoleto('');
+      setManualPayCheque('');
+      setManualPayOutros('');
+      setManualPayOutrosNote('');
+      setNewExpenseItem('');
+      setNewExpenseValue(0);
+      setNewSuprimentoItem('');
+      setNewSuprimentoValue(0);
+      setFormError('');
+      setSearchPixInActiveSettlementQuery('');
+    } else {
+      // Pre-register items from mobile app or defaults
+      const rawMobileSales = baseMov.productionControl?.mobileSales || [];
+      
+      // We must calculate autoPayments BEFORE we strip the paymentMethod
+      const autoPayments = { dinheiro: 0, pix: 0, boleto: 0, cheque: 0, outros: 0 };
+      rawMobileSales.forEach(s => {
+        if (s.paymentsBreakdown) {
+          autoPayments.dinheiro += s.paymentsBreakdown.dinheiro || 0;
+          autoPayments.pix += s.paymentsBreakdown.pix || 0;
+          autoPayments.boleto += s.paymentsBreakdown.boleto || 0;
+          autoPayments.cheque += s.paymentsBreakdown.cheque || 0;
+          autoPayments.outros += s.paymentsBreakdown.outros || 0;
+        } else {
+          const method = s.paymentMethod || 'dinheiro';
+          const lineTotal = s.qty * s.value;
+          if (method === 'dinheiro') {
+            autoPayments.dinheiro += lineTotal;
+          } else if (method === 'pix') {
+            autoPayments.pix += lineTotal;
+          } else if (method === 'boleto') {
+            autoPayments.boleto += lineTotal;
+          } else if (method === 'cheque') {
+            autoPayments.cheque += lineTotal;
+          } else {
+            autoPayments.outros += lineTotal;
+          }
+        }
+      });
+      
+      autoPayments.dinheiro = Number(autoPayments.dinheiro.toFixed(2));
+      autoPayments.pix = Number(autoPayments.pix.toFixed(2));
+      autoPayments.boleto = Number(autoPayments.boleto.toFixed(2));
+      autoPayments.cheque = Number(autoPayments.cheque.toFixed(2));
+      autoPayments.outros = Number(autoPayments.outros.toFixed(2));
+      
+      // Group the sales by product type/price and strip client names
+      // So the cashier sees clean integer quantities like "Água 20 Lts", "Bonificação"
+      const groupedSalesMap = new Map<string, SettlementSale>();
+      
+      rawMobileSales.forEach(s => {
+        // Remove client name prefix (e.g. "João - Água 20L" -> "Água 20L")
+        const itemParts = s.item.split(' - ');
+        let cleanItem = itemParts.length > 1 ? itemParts.slice(1).join(' - ') : s.item;
+        
+        // Map common names
+        if (cleanItem.toLowerCase().includes('água') || cleanItem.toLowerCase().includes('agua')) cleanItem = 'Água 20 Lts';
+        if (cleanItem.toLowerCase() === 'vasilhame') cleanItem = 'Vasilhame';
+        if (cleanItem.toLowerCase().includes('bonifica')) cleanItem = 'Bonificação';
+        if (cleanItem.toLowerCase().includes('comodato')) cleanItem = 'Comodato (Vasilhame)';
+        if (cleanItem.toLowerCase().includes('retorno')) cleanItem = 'Retorno Comodato (Vasilhame)';
+
+        const key = `${cleanItem}_${s.value.toFixed(2)}`;
+        
+        if (groupedSalesMap.has(key)) {
+          const existing = groupedSalesMap.get(key)!;
+          existing.qty += s.qty;
+          // Clean up floating point precision issues from splits (force integer)
+          existing.qty = Math.round(existing.qty); 
+        } else {
+          groupedSalesMap.set(key, {
+            id: 'grp-' + Math.random().toString(36).substring(2, 9),
+            saleNumber: 'consolidado',
+            item: cleanItem,
+            qty: Math.round(s.qty), // force integer
+            value: s.value,
+            paymentMethod: 'consolidado', // we no longer care about item-level payment methods
+            productType: s.productType
+          });
+        }
+      });
+
+      const initialSales: SettlementSale[] = Array.from(groupedSalesMap.values());
+
+      let initialExpenses: SettlementExpense[] = baseMov.productionControl?.mobileExpenses || [];
+      if (initialExpenses.length === 0) {
+        initialExpenses = [
+          {
+            id: 'exp-almoco-' + Date.now().toString(36) + '1',
+            item: 'Almoço',
+            value: 0
+          },
+          {
+            id: 'exp-ajudante-' + Date.now().toString(36) + '2',
+            item: 'Ajudante',
+            value: 0
+          }
+        ];
+      }
+
+      setComodatoVasilhameQty(baseMov.productionControl?.mobileComodato || 0);
+
+      const descarregamentoAvariasQty = unloadAvarias
+        .filter(a => isDriverDeductibleAvaria(a.type, customAvariaTypes || []))
+        .reduce((sum, item) => sum + item.qty, 0);
+
+      const rawMissingQty = mergedControl.differenceReasonsBreakdown?.find(b => b.reason === 'falta')?.qty || 0;
+
+      const initialSuprimentos: SettlementSuprimento[] = (baseMov.cashAdvances || []).map(adv => ({
+        id: 'sup-adv-' + Math.random().toString(36).substring(2, 9),
+        item: `Adiantamento: ${adv.reason || 'Adiantamento de Viagem'}`,
+        value: adv.value
+      }));
+
+      const totalExpenses = initialExpenses.reduce((sum, e) => sum + e.value, 0);
+      const totalSuprimentos = initialSuprimentos.reduce((sum, s) => sum + s.value, 0);
+      const adjustedPayments = {
+        ...autoPayments,
+        dinheiro: Number(Math.max(0, autoPayments.dinheiro - totalExpenses + totalSuprimentos).toFixed(2))
+      };
+
+      setSales(initialSales);
+      setExpenses(initialExpenses);
+      setSuprimentos(initialSuprimentos);
+      
+      setPayments(adjustedPayments);
+      setSelectedPixTxIds([]);
+      setAvariaQty(Math.max(0, descarregamentoAvariasQty - tolerance));
+      setAvariaUnitValue(0);
+      setVendaVasilhameQty(rawMissingQty);
+      setComodatoVasilhameQty(baseMov.productionControl?.mobileComodato || 0);
+      setManualSaleClientName('');
+      setManualSaleQty('');
+      setManualSaleUnitPrice('');
+      setManualSaleCart([]);
+      setManualPayDinheiro('');
+      setManualPayPix('');
+      setManualPayBoleto('');
+      setManualPayCheque('');
+      setManualPayOutros('');
+      setManualPayOutrosNote('');
+      setNewExpenseItem('');
+      setNewExpenseValue(0);
+      setNewSuprimentoItem('');
+      setNewSuprimentoValue(0);
+      setObservation('');
+      setFormError('');
+      setDateArrival(nowStr);
+      setSearchPixInActiveSettlementQuery('');
+
+      // Resolve driver commission percent
+      if (matchingDriver?.commissionPercent !== undefined) {
+        setCommissionPercent(matchingDriver.commissionPercent);
+      } else {
+        setCommissionPercent(8); // company default
+      }
+    }
+  };
+
+  const handleAddToManualCart = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!manualSaleQty || Number(manualSaleQty) <= 0) {
+      alert("Por favor, preencha uma quantidade válida.");
+      return;
+    }
+    const isZeroVal = manualSaleProductType === 'bonificacao' || manualSaleProductType === 'comodato';
+    const unitPrice = isZeroVal ? 0 : (manualSaleUnitPrice === '' ? 0 : Number(manualSaleUnitPrice));
+    
+    if (!isZeroVal && unitPrice <= 0) {
+      alert("Por favor, informe o preço unitário do produto.");
+      return;
+    }
+
+    setManualSaleCart([
+      ...manualSaleCart,
+      {
+        productType: manualSaleProductType,
+        qty: Number(manualSaleQty),
+        unitPrice: unitPrice
+      }
+    ]);
+
+    // Clear product inputs (but keep client name selected!)
+    setManualSaleQty('');
+    setManualSaleUnitPrice('');
+  };
+
+  const handleRemoveFromManualCart = (index: number) => {
+    setManualSaleCart(manualSaleCart.filter((_, idx) => idx !== index));
+  };
+
+  const handleAutoFillManualPayment = (method: 'dinheiro' | 'pix' | 'boleto' | 'cheque' | 'outros') => {
+    const total = manualSaleCart.reduce((sum, item) => sum + (item.qty * item.unitPrice), 0);
+    setManualPayDinheiro(method === 'dinheiro' ? total.toFixed(2) : '');
+    setManualPayPix(method === 'pix' ? total.toFixed(2) : '');
+    setManualPayBoleto(method === 'boleto' ? total.toFixed(2) : '');
+    setManualPayCheque(method === 'cheque' ? total.toFixed(2) : '');
+    setManualPayOutros(method === 'outros' ? total.toFixed(2) : '');
+  };
+
+  const handleFinalizeManualSale = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!manualSaleClientName.trim()) {
+      alert("Por favor, informe o cliente.");
+      return;
+    }
+    if (manualSaleCart.length === 0) {
+      alert("O carrinho está vazio. Adicione pelo menos um produto.");
+      return;
+    }
+
+    const cartTotal = manualSaleCart.reduce((sum, item) => sum + (item.qty * item.unitPrice), 0);
+    const valDinheiro = parseFloat(manualPayDinheiro) || 0;
+    const valPix = parseFloat(manualPayPix) || 0;
+    const valBoleto = parseFloat(manualPayBoleto) || 0;
+    const valCheque = parseFloat(manualPayCheque) || 0;
+    const valOutros = parseFloat(manualPayOutros) || 0;
+    const totalPaid = valDinheiro + valPix + valBoleto + valCheque + valOutros;
+
+    if (cartTotal > 0 && Math.abs(totalPaid - cartTotal) > 0.01) {
+      alert(`O total das formas de pagamento (R$ ${totalPaid.toFixed(2)}) deve ser igual ao total dos produtos (R$ ${cartTotal.toFixed(2)}).`);
+      return;
+    }
+
+    const generatedSaleNumber = 'VD-AC-' + Date.now().toString().slice(-4) + '-' + Math.floor(100 + Math.random() * 900);
+    const saleTimestamp = new Date().toISOString();
+    const finalSalesToAdd: SettlementSale[] = [];
+
+    const paidItems = manualSaleCart.filter(item => item.unitPrice > 0);
+    const freeItems = manualSaleCart.filter(item => item.unitPrice === 0);
+
+    // 1. Process free items directly
+    freeItems.forEach(item => {
+      finalSalesToAdd.push({
+        id: 'sale-' + Math.random().toString(36).substring(2, 9),
+        saleNumber: generatedSaleNumber,
+        item: getManualProductDisplayName(item.productType),
+        qty: Math.round(item.qty),
+        value: 0,
+        paymentMethod: 'dinheiro',
+        productType: item.productType,
+        clientName: manualSaleClientName.trim(),
+        timestamp: saleTimestamp,
+        paymentsBreakdown: { dinheiro: 0, pix: 0, boleto: 0, cheque: 0, outros: 0 }
+      });
+    });
+
+    // 2. Process paid items and distribute payments proportionally
+    if (paidItems.length > 0) {
+      let allocatedDinheiro = 0;
+      let allocatedPix = 0;
+      let allocatedBoleto = 0;
+      let allocatedCheque = 0;
+      let allocatedOutros = 0;
+
+      paidItems.forEach((item, index) => {
+        const isLast = index === paidItems.length - 1;
+        const itemTotal = item.qty * item.unitPrice;
+        const ratio = itemTotal / cartTotal;
+
+        const itemDinheiro = isLast ? (valDinheiro - allocatedDinheiro) : Number((valDinheiro * ratio).toFixed(2));
+        const itemPix = isLast ? (valPix - allocatedPix) : Number((valPix * ratio).toFixed(2));
+        const itemBoleto = isLast ? (valBoleto - allocatedBoleto) : Number((valBoleto * ratio).toFixed(2));
+        const itemCheque = isLast ? (valCheque - allocatedCheque) : Number((valCheque * ratio).toFixed(2));
+        const itemOutros = isLast ? (valOutros - allocatedOutros) : Number((valOutros * ratio).toFixed(2));
+
+        allocatedDinheiro += itemDinheiro;
+        allocatedPix += itemPix;
+        allocatedBoleto += itemBoleto;
+        allocatedCheque += itemCheque;
+        allocatedOutros += itemOutros;
+
+        // Build payment method display string
+        const methods: string[] = [];
+        if (itemDinheiro > 0) methods.push('dinheiro');
+        if (itemPix > 0) methods.push('pix');
+        if (itemBoleto > 0) methods.push('boleto');
+        if (itemCheque > 0) methods.push('cheque');
+        if (itemOutros > 0) methods.push('outros');
+
+        const primaryMethod = methods.length === 1 ? methods[0] : (methods.length > 1 ? 'misto' : 'dinheiro');
+
+        // Build payment method note
+        const noteParts: string[] = [];
+        if (itemDinheiro > 0) noteParts.push(`Dinheiro: R$ ${itemDinheiro.toFixed(2)}`);
+        if (itemPix > 0) noteParts.push(`PIX: R$ ${itemPix.toFixed(2)}`);
+        if (itemBoleto > 0) noteParts.push(`Boleto: R$ ${itemBoleto.toFixed(2)}`);
+        if (itemCheque > 0) noteParts.push(`Cheque: R$ ${itemCheque.toFixed(2)}`);
+        if (itemOutros > 0) noteParts.push(`A Prazo: R$ ${itemOutros.toFixed(2)}`);
+        const generatedNote = noteParts.join(' | ') || undefined;
+
+        finalSalesToAdd.push({
+          id: 'sale-' + Math.random().toString(36).substring(2, 9),
+          saleNumber: generatedSaleNumber,
+          item: getManualProductDisplayName(item.productType),
+          qty: Math.round(item.qty), // Keep as integer!
+          value: item.unitPrice,
+          paymentMethod: primaryMethod,
+          paymentMethodNote: generatedNote || manualPayOutrosNote.trim() || undefined,
+          productType: item.productType,
+          clientName: manualSaleClientName.trim(),
+          timestamp: saleTimestamp,
+          paymentsBreakdown: {
+            dinheiro: itemDinheiro,
+            pix: itemPix,
+            boleto: itemBoleto,
+            cheque: itemCheque,
+            outros: itemOutros
+          }
+        });
+      });
+    }
+
+    setSales([...sales, ...finalSalesToAdd]);
+
+    // Also increase the cash register payments
+    setPayments(prev => ({
+      dinheiro: Number((prev.dinheiro + valDinheiro).toFixed(2)),
+      pix: Number((prev.pix + valPix).toFixed(2)),
+      boleto: Number((prev.boleto + valBoleto).toFixed(2)),
+      cheque: Number((prev.cheque + valCheque).toFixed(2)),
+      outros: Number((prev.outros + valOutros).toFixed(2))
+    }));
+
+    setManualSaleCart([]);
+    setManualSaleClientName('');
+    setManualPayDinheiro('');
+    setManualPayPix('');
+    setManualPayBoleto('');
+    setManualPayCheque('');
+    setManualPayOutros('');
+    setManualPayOutrosNote('');
+    alert("Venda manual adicionada e processada!");
+  };
+
+  const handleAddExpense = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newExpenseItem.trim()) return;
+    const newExpense: SettlementExpense = {
+      id: 'exp-' + Date.now().toString(36) + Math.random().toString(36).substr(2, 4),
+      item: newExpenseItem.trim(),
+      value: newExpenseValue
+    };
+    setExpenses([...expenses, newExpense]);
+    setPayments(prev => ({
+      ...prev,
+      dinheiro: Number(Math.max(0, prev.dinheiro - newExpenseValue).toFixed(2))
+    }));
+    setNewExpenseItem('');
+    setNewExpenseValue(0);
+  };
+
+  const handleAddSuprimento = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newSuprimentoItem.trim()) return;
+    const newSuprimento: SettlementSuprimento = {
+      id: 'sup-' + Date.now().toString(36) + Math.random().toString(36).substr(2, 4),
+      item: newSuprimentoItem.trim(),
+      value: newSuprimentoValue
+    };
+    setSuprimentos([...suprimentos, newSuprimento]);
+    setPayments(prev => ({
+      ...prev,
+      dinheiro: Number((prev.dinheiro + newSuprimentoValue).toFixed(2))
+    }));
+    setNewSuprimentoItem('');
+    setNewSuprimentoValue(0);
+  };
+
+  const handleRemoveSuprimento = (id: string) => {
+    const suprimentoToRemove = suprimentos.find(s => s.id === id);
+    if (suprimentoToRemove) {
+      setPayments(prev => ({
+        ...prev,
+        dinheiro: Number(Math.max(0, prev.dinheiro - suprimentoToRemove.value).toFixed(2))
+      }));
+    }
+    setSuprimentos(suprimentos.filter(s => s.id !== id));
+  };
+
+  const handleUpdateSuprimentoValue = (id: string, value: number) => {
+    const targetSuprimento = suprimentos.find(s => s.id === id);
+    if (targetSuprimento) {
+      const diff = value - targetSuprimento.value;
+      setPayments(prev => ({
+        ...prev,
+        dinheiro: Number(Math.max(0, prev.dinheiro + diff).toFixed(2))
+      }));
+    }
+    setSuprimentos(suprimentos.map(s => s.id === id ? { ...s, value: Math.max(0, value) } : s));
+  };
+
+  const handleRemoveSale = (id: string) => {
+    const saleToRemove = sales.find(s => s.id === id);
+    if (saleToRemove) {
+      const isZeroVal = saleToRemove.item.toLowerCase().includes('bonifica') || saleToRemove.item.toLowerCase().includes('comodato');
+      const lineTotal = saleToRemove.qty * (isZeroVal ? 0 : saleToRemove.value);
+      const method = saleToRemove.paymentMethod || 'dinheiro';
+      if (lineTotal > 0) {
+        if (method === 'dinheiro') {
+          setPayments(prev => ({ ...prev, dinheiro: Math.max(0, prev.dinheiro - lineTotal) }));
+        } else if (method === 'pix') {
+          setPayments(prev => ({ ...prev, pix: Math.max(0, prev.pix - lineTotal) }));
+        } else if (method === 'boleto') {
+          setPayments(prev => ({ ...prev, boleto: Math.max(0, prev.boleto - lineTotal) }));
+        } else if (method === 'cheque') {
+          setPayments(prev => ({ ...prev, cheque: Math.max(0, prev.cheque - lineTotal) }));
+        } else {
+          setPayments(prev => ({ ...prev, outros: Math.max(0, prev.outros - lineTotal) }));
+        }
+      }
+    }
+    setSales(sales.filter(s => s.id !== id));
+  };
+
+  const handleRemoveExpense = (id: string) => {
+    const expenseToRemove = expenses.find(e => e.id === id);
+    if (expenseToRemove) {
+      setPayments(prev => ({
+        ...prev,
+        dinheiro: Number((prev.dinheiro + expenseToRemove.value).toFixed(2))
+      }));
+    }
+    setExpenses(expenses.filter(e => e.id !== id));
+  };
+
+  const handleUpdateSaleQty = (id: string, qty: number) => {
+    setSales(sales.map(s => s.id === id ? { ...s, qty: Math.max(0, qty) } : s));
+  };
+
+  const handleUpdateSaleValue = (id: string, value: number) => {
+    setSales(sales.map(s => s.id === id ? { ...s, value: Math.max(0, value) } : s));
+  };
+
+  const handleUpdateExpenseValue = (id: string, value: number) => {
+    const targetExpense = expenses.find(e => e.id === id);
+    if (targetExpense) {
+      const diff = value - targetExpense.value;
+      setPayments(prev => ({
+        ...prev,
+        dinheiro: Number(Math.max(0, prev.dinheiro - diff).toFixed(2))
+      }));
+    }
+    setExpenses(expenses.map(e => e.id === id ? { ...e, value: Math.max(0, value) } : e));
+  };
+
+  const handleAutoFillSuggestions = () => {
+    const list: SettlementSale[] = [];
+    if (suggestedWaterQty > 0) {
+      list.push({
+        id: 'sale-agua-' + Date.now().toString(36) + '1',
+        item: 'Água 20 Lts',
+        qty: suggestedWaterQty,
+        value: 10.00
+      });
+    }
+    if (currentTargetVasilhameQty > 0) {
+      list.push({
+        id: 'sale-vasilhame-' + Date.now().toString(36) + '2',
+        item: 'Vasilhame',
+        qty: currentTargetVasilhameQty,
+        value: 50.00
+      });
+    }
+    setSales(list);
+  };
+
+  const handleSaveSettlement = (isDraft: boolean = false, bypassQtyCheck: boolean = false) => {
+    if (!selectedMovement) return;
+    if (!isDraft && !dateArrival) {
+      setFormError('A data de chegada do motorista é obrigatória.');
+      return;
+    }
+
+    if (!isDraft && !bypassQtyCheck) {
+      const enteredWaterQty = sales
+        .filter(s => s.item.toLowerCase().includes('água') || s.item.toLowerCase().includes('agua') || s.item.toLowerCase().includes('bonifica'))
+        .reduce((sum, s) => sum + s.qty, 0);
+      const enteredVasilhameQty = sales
+        .filter(s => s.item.toLowerCase().includes('vasilhame') && !s.item.toLowerCase().includes('retorno'))
+        .reduce((sum, s) => sum + s.qty, 0);
+
+      const hasQtyMismatch = (enteredWaterQty !== suggestedWaterQty) || (enteredVasilhameQty !== currentTargetVasilhameQty);
+      if (hasQtyMismatch) {
+        setShowQtyWarningModal(true);
+        return;
+      }
+    }
+
+    const matchingDriver = registeredDrivers?.find(d => d.name.toLowerCase() === selectedMovement.driver.toLowerCase());
+    const driverId = matchingDriver?.id || 'unknown';
+
+    // Find if we already have a draft for this movement (checking both raw and prefixed IDs)
+    const existingDraft = driverSettlements.find(ds => 
+      ds.status === 'pending' && (ds.movementId === selectedMovement.id || ds.movementId === `settled-${selectedMovement.id}`)
+    );
+    const settlementId = existingDraft ? existingDraft.id : ('set-' + Date.now().toString(36));
+
+    const isEntrada = selectedMovement.type === 'entrada';
+    const movementIdValue = existingDraft ? existingDraft.movementId : (isEntrada ? `settled-${selectedMovement.id}` : selectedMovement.id);
+
+    const newSettlement: DriverSettlement = {
+      id: settlementId,
+      movementId: movementIdValue,
+      tripControlNumber: selectedMovement.productionCode || selectedMovement.id,
+      driverId: driverId,
+      driverName: selectedMovement.driver,
+      plate: selectedMovement.plate,
+      dateSettlement: existingDraft ? existingDraft.dateSettlement : new Date().toISOString().split('T')[0],
+      dateExit: selectedMovement.exitTimestamp || selectedMovement.entryTimestamp || selectedMovement.timestamp, // default to exit or entry or timestamp
+      dateArrival: dateArrival,
+      sales: sales,
+      expenses: expenses,
+      suprimentos: suprimentos,
+      payments: payments,
+      avarias: {
+        qty: avariaQty,
+        value: avariaUnitValue,
+        total: avariaQty * avariaUnitValue
+      },
+      observation: observation,
+      commissionPercent: commissionPercent,
+      
+      // Totals
+      totalSales: totalSalesAmount,
+      totalExpenses: totalExpensesAmount,
+      totalSuprimentos: totalSuprimentosAmount,
+      totalToReceive: totalToReceive,
+      totalDelivered: totalDelivered,
+      difference: difference,
+      
+      // Commission
+      basicCommission: basicCommission,
+      avariaDeduction: avariaDeduction,
+      shortageDeduction: shortageDeduction,
+      finalCommission: finalCommission,
+      
+      isReconciled: isDraft 
+        ? (existingDraft ? existingDraft.isReconciled : false)
+        : (((payments.pix || 0) === 0 || selectedPixTxIds.length > 0) ? true : (existingDraft ? existingDraft.isReconciled : false)),
+      reconciledPixTransactionId: selectedPixTxIds[0] || undefined,
+      reconciledPixTransactionIds: selectedPixTxIds,
+      reconciledAt: isDraft 
+        ? (existingDraft ? existingDraft.reconciledAt : undefined)
+        : (((payments.pix || 0) === 0 || selectedPixTxIds.length > 0) ? new Date().toISOString() : (existingDraft ? existingDraft.reconciledAt : undefined)),
+      status: isDraft ? 'pending' : 'completed',
+      unit: (currentUser?.unit as 'matriz' | 'filial') || 'matriz',
+      vendaVasilhameQty: vendaVasilhameQty,
+      comodatoVasilhameQty: comodatoVasilhameQty,
+      missingBottlesQty: missingBottlesQty,
+      finalUnaccountedShortage: Math.max(0, missingBottlesQty - vendaVasilhameQty - comodatoVasilhameQty)
+    };
+
+    if (existingDraft) {
+      updateDriverSettlement(existingDraft.id, newSettlement);
+    } else {
+      addDriverSettlement(newSettlement);
+    }
+
+    // Only reconcile with PIX if we are NOT in draft and have selected transaction IDs
+    if (!isDraft && selectedPixTxIds.length > 0) {
+      reconcileDriverSettlementWithPix(settlementId, selectedPixTxIds);
+    }
+
+    setSelectedMovement(null);
+    setSelectedPixTxIds([]);
+    setShowQtyWarningModal(false);
+    setActiveSubTab(isDraft ? 'pending_movements' : 'history');
+  };
+
+  // Parse simulated or real Bank file (OFX, CSV or TXT)
+  const handleBankFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target?.result as string;
+      const userUnit = (currentUser?.unit as 'matriz' | 'filial') || 'matriz';
+      let parsedTransactions: BankTransaction[] = [];
+
+      try {
+        if (text.toUpperCase().includes('<OFX>') || text.toUpperCase().includes('<STMTTRN>')) {
+          parsedTransactions = parseOFX(text, userUnit);
+        } else {
+          parsedTransactions = parseCSVOrTXT(text, userUnit);
+        }
+      } catch (err) {
+        console.error("Erro ao analisar arquivo bancário:", err);
+      }
+
+      if (parsedTransactions.length > 0) {
+        importBankTransactions(parsedTransactions);
+        setImportSuccessMessage(`Importação concluída! ${parsedTransactions.length} transações recebidas (PIX/Transferências) importadas com sucesso.`);
+      } else {
+        // Fallback ONLY if parsing really failed to produce any results AND it wasn't a valid format
+        const mockTxs: BankTransaction[] = [
+          {
+            id: 'tx-sim-1',
+            date: new Date().toISOString().split('T')[0],
+            description: 'PIX RECEBIDO - CARLOS SILVA',
+            amount: 1450.00,
+            documentRef: 'E0018374920260624',
+            isReconciled: false,
+            importedAt: new Date().toISOString(),
+            unit: userUnit
+          },
+          {
+            id: 'tx-sim-2',
+            date: new Date().toISOString().split('T')[0],
+            description: 'RECEBIMENTO PIX - POSTO ABC',
+            amount: 850.50,
+            documentRef: 'E0018374920260625',
+            isReconciled: false,
+            importedAt: new Date().toISOString(),
+            unit: userUnit
+          },
+          {
+            id: 'tx-sim-3',
+            date: new Date().toISOString().split('T')[0],
+            description: 'PIX COBRANCA CLIENTE XPTO',
+            amount: 3200.00,
+            documentRef: 'E0018374920260626',
+            isReconciled: false,
+            importedAt: new Date().toISOString(),
+            unit: userUnit
+          }
+        ];
+        importBankTransactions(mockTxs);
+        setImportSuccessMessage(`Nenhuma transação encontrada no arquivo. Importando transações de teste para demonstração.`);
+      }
+      setTimeout(() => setImportSuccessMessage(''), 6000);
+    };
+    reader.readAsText(file);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  // Filter bank transactions
+  const filteredBankTxs = bankTransactions.filter(tx => {
+    const query = searchBankQuery.toLowerCase().trim();
+    if (!query) {
+      if (filterBankReconciliation === 'reconciled') {
+        return tx.isReconciled;
+      } else if (filterBankReconciliation === 'pending') {
+        return !tx.isReconciled;
+      }
+      return true;
+    }
+
+    const matchesDesc = tx.description.toLowerCase().includes(query);
+    const matchesAmount = tx.amount.toString().includes(query) || 
+                          tx.amount.toFixed(2).includes(query) ||
+                          tx.amount.toFixed(2).replace('.', ',').includes(query);
+    const matchesRef = (tx.documentRef || '').toLowerCase().includes(query);
+    const matchesDate = tx.date.includes(query) || (() => {
+      const [y, m, d] = tx.date.split('-');
+      if (y && m && d) {
+        const brDate = `${d}/${m}/${y}`;
+        const brDateShort = `${d}/${m}`;
+        return brDate.includes(query) || brDateShort.includes(query);
+      }
+      return false;
+    })();
+
+    const matchesSearch = matchesDesc || matchesAmount || matchesRef || matchesDate;
+    
+    if (filterBankReconciliation === 'reconciled') {
+      return matchesSearch && tx.isReconciled;
+    } else if (filterBankReconciliation === 'pending') {
+      return matchesSearch && !tx.isReconciled;
+    }
+    return matchesSearch;
+  });
+
+  const handleOpenReconcile = (settlement: DriverSettlement) => {
+    setReconcilingSettlement(settlement);
+    setSearchPixQuery('');
+    setSelectedTxIds(settlement.reconciledPixTransactionIds || (settlement.reconciledPixTransactionId ? [settlement.reconciledPixTransactionId] : []));
+  };
+
+  const handleConfirmReconciliation = (txIds: string[]) => {
+    if (!reconcilingSettlement) return;
+    reconcileDriverSettlementWithPix(reconcilingSettlement.id, txIds);
+    setReconcilingSettlement(null);
+  };
+
+  const handlePrintCashAdvance = (advance: {
+    id: string;
+    movementId: string;
+    driverName: string;
+    plate: string;
+    value: number;
+    reason: string;
+    timestamp: string;
+    operator: string;
+  }) => {
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) return;
+
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>Comprovante de Adiantamento - ${advance.driverName}</title>
+          <style>
+            @page {
+              size: auto;
+              margin: 4mm;
+            }
+            body { 
+              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+              padding: 10px; 
+              margin: 0; 
+              color: #000; 
+              line-height: 1.4; 
+              font-size: 13px;
+              background: #fff;
+            }
+            .receipt {
+              border: 1px solid #000;
+              padding: 18px;
+              max-width: 440px;
+              margin: 0 auto;
+              background: #fff;
+            }
+            .logo-area {
+              text-align: center;
+              font-weight: 900;
+              font-size: 16px;
+              letter-spacing: 2px;
+              text-transform: uppercase;
+              border-bottom: 2px solid #000;
+              padding-bottom: 6px;
+              margin-bottom: 12px;
+            }
+            .doc-title {
+              text-align: center;
+              font-size: 13px;
+              font-weight: 700;
+              text-transform: uppercase;
+              letter-spacing: 0.5px;
+              margin: 6px 0;
+            }
+            .divider {
+              border-top: 1px dashed #000;
+              margin: 12px 0;
+            }
+            .value-container {
+              border: 2px solid #000;
+              padding: 10px;
+              text-align: center;
+              margin: 12px 0;
+              background-color: #f8fafc;
+            }
+            .value-label {
+              font-size: 10px;
+              font-weight: 800;
+              text-transform: uppercase;
+              letter-spacing: 1px;
+              color: #475569;
+            }
+            .value-display {
+              font-size: 26px;
+              font-weight: 900;
+              color: #000;
+              margin-top: 4px;
+              font-family: monospace, Courier, monospace;
+            }
+            .info-table {
+              width: 100%;
+              margin: 12px 0;
+              border-collapse: collapse;
+            }
+            .info-table td {
+              padding: 5px 2px;
+              vertical-align: top;
+            }
+            .info-table td.label {
+              font-weight: bold;
+              text-transform: uppercase;
+              font-size: 11px;
+              width: 125px;
+              color: #334155;
+            }
+            .info-table td.value {
+              font-size: 12px;
+              color: #000;
+            }
+            .signature-section {
+              margin-top: 35px;
+              display: grid;
+              grid-template-columns: 1fr 1fr;
+              gap: 20px;
+              text-align: center;
+            }
+            .sig-box {
+              display: flex;
+              flex-direction: column;
+              align-items: center;
+            }
+            .sig-line {
+              border-top: 1px solid #000;
+              width: 100%;
+              margin-top: 30px;
+              padding-top: 6px;
+              font-size: 10px;
+              font-weight: 700;
+              text-transform: uppercase;
+            }
+            .footer {
+              text-align: center;
+              font-size: 9px;
+              color: #475569;
+              margin-top: 25px;
+              border-top: 1px dashed #000;
+              padding-top: 8px;
+              line-height: 1.3;
+            }
+            @media print {
+              body { padding: 0; }
+              .receipt { border: 1px solid #000; }
+            }
+          </style>
+        </head>
+        <body onload="window.print(); window.close();">
+          <div class="receipt">
+            <div class="logo-area">VIA GERAL</div>
+            <div class="doc-title">Comprovante de Adiantamento</div>
+            <div class="doc-title" style="font-size: 10px; font-weight: normal; margin-top: -4px;">Controle de Caixa e Saída de Frota</div>
+            
+            <div class="divider"></div>
+
+            <div class="value-container">
+              <div class="value-label">VALOR DO REPASSE</div>
+              <div class="value-display">R$ ${advance.value.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+            </div>
+
+            <table class="info-table">
+              <tr>
+                <td class="label">ID Recibo:</td>
+                <td class="value" style="font-family: monospace; font-weight: bold;">${advance.id}</td>
+              </tr>
+              <tr>
+                <td class="label">Motorista:</td>
+                <td class="value" style="font-weight: bold;">${advance.driverName}</td>
+              </tr>
+              <tr>
+                <td class="label">Veículo/Placa:</td>
+                <td class="value" style="font-family: monospace;">${advance.plate.toUpperCase()}</td>
+              </tr>
+              <tr>
+                <td class="label">Motivo:</td>
+                <td class="value">${advance.reason}</td>
+              </tr>
+              <tr>
+                <td class="label">Emissão:</td>
+                <td class="value">${new Date(advance.timestamp).toLocaleString('pt-BR')}</td>
+              </tr>
+              <tr>
+                <td class="label">Operador:</td>
+                <td class="value">${advance.operator}</td>
+              </tr>
+            </table>
+
+            <div class="signature-section">
+              <div class="sig-box">
+                <div class="sig-line">Motorista</div>
+              </div>
+              <div class="sig-box">
+                <div class="sig-line">Conferente</div>
+              </div>
+            </div>
+
+            <div class="footer">
+              Este recibo comprova a entrega de valores em espécie para custeio de despesas de viagem.<br/>
+              A prestação de contas será exigida no retorno do veículo.<br/>
+              Emitido via Sistema de Logística - ${new Date().toLocaleString('pt-BR')}
+            </div>
+          </div>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
+  };
+
+  const handleSaveCashAdvance = () => {
+    if (!cashAdvanceMovement) return;
+    const value = parseFloat(cashAdvanceValue.replace(',', '.'));
+    if (isNaN(value) || value <= 0) {
+      alert('Por favor, informe um valor de adiantamento válido e maior que zero.');
+      return;
+    }
+    if (!cashAdvanceReason.trim()) {
+      alert('Por favor, informe o motivo do adiantamento.');
+      return;
+    }
+
+    const newAdvance = {
+      id: 'ADV-' + Math.random().toString(36).substring(2, 9).toUpperCase(),
+      value,
+      reason: cashAdvanceReason.trim(),
+      timestamp: new Date().toISOString(),
+      operator: currentUser?.name || 'Conferente'
+    };
+
+    const updatedAdvances = [...(cashAdvanceMovement.cashAdvances || []), newAdvance];
+    updateMovementDetails(cashAdvanceMovement.id, {
+      cashAdvances: updatedAdvances
+    });
+
+    const receiptData = {
+      id: newAdvance.id,
+      movementId: cashAdvanceMovement.id,
+      driverName: cashAdvanceMovement.driver,
+      plate: cashAdvanceMovement.plate,
+      value: newAdvance.value,
+      reason: newAdvance.reason,
+      timestamp: newAdvance.timestamp,
+      operator: newAdvance.operator
+    };
+
+    setCashAdvanceReceipt(receiptData);
+    setCashAdvanceValue('');
+    setCashAdvanceReason('');
+    
+    handlePrintCashAdvance(receiptData);
+  };
+
+  const handlePrint = (settlement: DriverSettlement) => {
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) return;
+
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>Prestação de Contas - ${settlement.driverName}</title>
+          <style>
+            @page {
+              size: A4 portrait;
+              margin: 0.6cm;
+            }
+            body { 
+              font-family: system-ui, -apple-system, sans-serif; 
+              padding: 0; 
+              margin: 0; 
+              color: #1e293b; 
+              line-height: 1.3; 
+              font-size: 10px;
+            }
+            .header { border-bottom: 1.5px solid #334155; padding-bottom: 4px; margin-bottom: 8px; }
+            .title { font-size: 13px; font-weight: 800; margin: 0; text-transform: uppercase; color: #0f172a; }
+            .subtitle { font-size: 8px; color: #64748b; margin: 2px 0 0 0; font-weight: 600; text-transform: uppercase; }
+            h3 { 
+              font-size: 9px; 
+              font-weight: 800; 
+              margin: 8px 0 4px 0; 
+              text-transform: uppercase; 
+              letter-spacing: 0.5px;
+              color: #334155;
+              border-bottom: 1px solid #e2e8f0;
+              padding-bottom: 1px;
+            }
+            .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 8px; }
+            .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 8px; }
+            .info-label { font-size: 7.5px; text-transform: uppercase; color: #64748b; font-weight: bold; letter-spacing: 0.3px; }
+            .info-value { font-size: 10px; font-weight: 700; color: #0f172a; }
+            table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+            th, td { border: 1px solid #cbd5e1; padding: 4px 6px; text-align: left; font-size: 9.5px; }
+            th { background-color: #f8fafc; font-weight: 800; font-size: 8px; text-transform: uppercase; color: #475569; }
+            .totals { font-weight: bold; text-align: right; }
+            .commission-card { background-color: #f8fafc; border: 1px solid #e2e8f0; padding: 8px 12px; border-radius: 4px; margin-top: 8px; }
+            .green { color: #15803d; }
+            .red { color: #b91c1c; }
+            .obs-box { background-color: #f8fafc; border: 1px solid #e2e8f0; padding: 6px 10px; border-radius: 4px; margin-top: 6px; font-size: 9px; }
+            .signature-section { margin-top: 20px; display: grid; grid-template-columns: 1fr 1fr; gap: 40px; page-break-inside: avoid; }
+            .signature-line { border-top: 1px solid #475569; margin-top: 20px; padding-top: 3px; font-size: 9px; font-weight: bold; text-align: center; text-transform: uppercase; color: #1e293b; }
+            .receipt-section { margin-top: 20px; border-top: 1.5px dashed #cbd5e1; padding-top: 12px; page-break-inside: avoid; }
+          </style>
+        </head>
+        <body>
+          <div class="header">
+            <h1 class="title">RESUMO DE PRESTAÇÃO DE CONTAS - MOTORISTA</h1>
+            <p class="subtitle">ID Acerto: ${settlement.id} | Data: ${settlement.dateSettlement} | Terrasul envasadora de bebidas Ltda.</p>
+          </div>
+          
+          <div class="grid-4">
+            <div>
+              <div class="info-label">Motorista</div>
+              <div class="info-value">${settlement.driverName}</div>
+            </div>
+            <div>
+              <div class="info-label">Veículo / Placa</div>
+              <div class="info-value">${settlement.plate}</div>
+            </div>
+            <div>
+              <div class="info-label">Data Saída</div>
+              <div class="info-value">${new Date(settlement.dateExit).toLocaleDateString('pt-BR')} ${new Date(settlement.dateExit).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</div>
+            </div>
+            <div>
+              <div class="info-label">Data Chegada</div>
+              <div class="info-value">${new Date(settlement.dateArrival).toLocaleDateString('pt-BR')} ${new Date(settlement.dateArrival).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</div>
+            </div>
+          </div>
+
+          <h3>PRODUTOS E VENDAS ENTREGUES</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>Item / Descrição</th>
+                <th>Quantidade</th>
+                <th>Valor Unitário</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${settlement.sales.map(s => `
+                <tr>
+                  <td style="font-weight: 600;">${s.item}</td>
+                  <td style="font-weight: 700; font-family: monospace;">${s.qty}</td>
+                  <td style="font-family: monospace;">R$ ${s.value.toFixed(2)}</td>
+                  <td style="font-weight: 700; font-family: monospace;">R$ ${(s.qty * s.value).toFixed(2)}</td>
+                </tr>
+              `).join('')}
+              ${settlement.sales.length === 0 ? '<tr><td colspan="4">Nenhuma venda informada</td></tr>' : ''}
+              <tr style="font-weight: bold; background-color: #f8fafc;">
+                <td colspan="3" style="text-align: right; text-transform: uppercase; font-size: 8px; color: #475569;">Total de Vendas:</td>
+                <td style="font-family: monospace;">R$ ${settlement.totalSales.toFixed(2)}</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+            <div>
+              <h3>DESPESAS DE VIAGEM</h3>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Descrição da Despesa</th>
+                    <th>Valor</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${settlement.expenses.map(e => `
+                    <tr>
+                      <td style="font-weight: 500;">${e.item}</td>
+                      <td style="font-weight: 700; font-family: monospace;">R$ ${e.value.toFixed(2)}</td>
+                    </tr>
+                  `).join('')}
+                  ${settlement.expenses.length === 0 ? '<tr><td colspan="2" style="color: #64748b; font-style: italic;">Nenhuma despesa informada</td></tr>' : ''}
+                  <tr style="font-weight: bold; background-color: #f8fafc;">
+                    <td style="text-align: right; text-transform: uppercase; font-size: 8px; color: #475569;">Total de Despesas:</td>
+                    <td style="font-family: monospace;">R$ ${settlement.totalExpenses.toFixed(2)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div>
+              <h3>VALORES ENTREGUES</h3>
+              <table>
+                <thead>
+                  <tr>
+                    <th>Forma</th>
+                    <th>Valor</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${settlement.payments.dinheiro > 0 ? `<tr><td>Dinheiro</td><td style="font-family: monospace; font-weight: 600;">R$ ${settlement.payments.dinheiro.toFixed(2)}</td></tr>` : ''}
+                  ${settlement.payments.pix > 0 ? `<tr><td>PIX</td><td style="font-family: monospace; font-weight: 600;">R$ ${settlement.payments.pix.toFixed(2)}</td></tr>` : ''}
+                  ${settlement.payments.boleto > 0 ? `<tr><td>Boleto</td><td style="font-family: monospace; font-weight: 600;">R$ ${settlement.payments.boleto.toFixed(2)}</td></tr>` : ''}
+                  ${settlement.payments.cheque > 0 ? `<tr><td>Cheque</td><td style="font-family: monospace; font-weight: 600;">R$ ${settlement.payments.cheque.toFixed(2)}</td></tr>` : ''}
+                  ${settlement.payments.outros > 0 ? `<tr><td>Outros</td><td style="font-family: monospace; font-weight: 600;">R$ ${settlement.payments.outros.toFixed(2)}</td></tr>` : ''}
+                  ${(settlement.payments.dinheiro === 0 && settlement.payments.pix === 0 && settlement.payments.boleto === 0 && settlement.payments.cheque === 0 && settlement.payments.outros === 0) ? '<tr><td colspan="2" style="color: #64748b; font-style: italic;">Nenhum valor informado</td></tr>' : ''}
+                  <tr style="font-weight: bold; background-color: #f8fafc;">
+                    <td style="text-transform: uppercase; font-size: 8px; color: #475569;">Total Entregue:</td>
+                    <td style="font-family: monospace;">R$ ${settlement.totalDelivered.toFixed(2)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="grid-2">
+            <div>
+              <div class="info-label">Valor Esperado Liquido (Vendas - Despesas)</div>
+              <div class="info-value" style="font-family: monospace;">R$ ${settlement.totalToReceive.toFixed(2)}</div>
+            </div>
+            <div>
+              <div class="info-label">Diferença de Caixa</div>
+              <div class="info-value ${settlement.difference < 0 ? 'red' : 'green'}" style="font-family: monospace;">
+                R$ ${settlement.difference.toFixed(2)} ${settlement.difference < 0 ? '(Falta)' : '(Sobra)'}
+              </div>
+            </div>
+          </div>
+
+          <div class="commission-card">
+            <h4 style="margin: 0 0 6px 0; font-size: 9.5px; font-weight: 800; text-transform: uppercase; color: #1e293b; border-bottom: 1px solid #e2e8f0; padding-bottom: 2px;">FECHAMENTO DA COMISSÃO DO MOTORISTA</h4>
+            <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+              <span>Comissão Básica (${settlement.commissionPercent}% sobre Vendas):</span>
+              <span style="font-weight: 700; font-family: monospace;">R$ ${settlement.basicCommission.toFixed(2)}</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; margin-bottom: 4px; color: #b91c1c;">
+              <span>Desconto de Avarias / Perdas (${settlement.avarias.qty} un):</span>
+              <span style="font-weight: 700; font-family: monospace;">- R$ ${settlement.avariaDeduction.toFixed(2)}</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; margin-bottom: 4px; color: ${settlement.difference < 0 ? '#b91c1c' : 'inherit'};">
+              <span>Desconto de Falta de Caixa:</span>
+              <span style="font-weight: 700; font-family: monospace;">- R$ ${settlement.shortageDeduction.toFixed(2)}</span>
+            </div>
+            <hr style="border: none; border-top: 1px solid #cbd5e1; margin: 4px 0;" />
+            <div style="display: flex; justify-content: space-between; font-size: 11px; font-weight: 800; margin-top: 4px;">
+              <span>COMISSÃO LÍQUIDA A PAGAR:</span>
+              <span class="green" style="font-family: monospace;">R$ ${settlement.finalCommission.toFixed(2)}</span>
+            </div>
+          </div>
+
+          ${settlement.observation ? `
+            <div class="obs-box">
+              <strong style="text-transform: uppercase; font-size: 7.5px; color: #64748b; display: block; margin-bottom: 2px; letter-spacing: 0.3px;">Observações:</strong>
+              <div style="line-height: 1.3; white-space: pre-wrap; color: #334155;">${settlement.observation}</div>
+            </div>
+          ` : ''}
+
+          ${settlement.isReconciled ? `
+            <div style="margin-top: 8px; padding: 4px; background-color: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 4px; font-size: 9px; font-weight: bold; color: #166534; text-align: center;">
+              ✓ ACERTO CONCILIADO VIA PIX BANCÁRIO
+            </div>
+          ` : ''}
+
+          <!-- SIGNATURE FIELD IN SETTLEMENT SUMMARY FOR CONFERENTE AND MOTORISTA -->
+          <div class="signature-section" style="margin-top: 25px;">
+            <div>
+              <div class="signature-line" style="margin-top: 45px;">
+                ${settlement.driverName}<br/>
+                <span style="font-weight: normal; color: #64748b; font-size: 8px; text-transform: none;">Motorista (Assinatura do Acerto)</span>
+              </div>
+            </div>
+            <div>
+              <div class="signature-line" style="margin-top: 45px;">
+                ${currentUser?.name || 'Conferente'}<br/>
+                <span style="font-weight: normal; color: #64748b; font-size: 8px; text-transform: none;">Assinatura do Conferente (Operador)</span>
+              </div>
+            </div>
+          </div>
+          
+          <!-- COMMISSION RECEIPT FOR MOTORISTA TO SIGN -->
+          <div class="receipt-section">
+            <div style="text-align: center; margin-bottom: 6px;">
+              <h2 style="font-size: 11px; font-weight: 800; margin: 0; text-transform: uppercase; letter-spacing: 0.5px; color: #0f172a;">Comprovante de Recebimento de Comissão</h2>
+              <p style="font-size: 7.5px; color: #64748b; margin: 2px 0 0 0; font-weight: 600;">ID Acerto: ${settlement.id} | Data: ${settlement.dateSettlement}</p>
+            </div>
+            
+            <p style="font-size: 9.5px; line-height: 1.4; text-align: justify; margin: 4px 0 10px 0; color: #334155;">
+              Declaro que recebi de <strong>Terrasul envasadora de bebidas Ltda.</strong> a importância líquida de 
+              <strong>R$ ${settlement.finalCommission.toFixed(2)}</strong> 
+              (<em>${valorPorExtenso(settlement.finalCommission)}</em>), referente ao pagamento de minha comissão de viagens e entregas realizada no veículo de placa <strong>${settlement.plate}</strong>, no período de <strong>${new Date(settlement.dateExit).toLocaleDateString('pt-BR')}</strong> a <strong>${new Date(settlement.dateArrival).toLocaleDateString('pt-BR')}</strong>, com os descontos devidamente processados, conforme memória de cálculo detalhada abaixo:
+            </p>
+
+            <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; padding: 6px 10px; border-radius: 4px; font-size: 8.5px; margin: 6px 0 12px 0; font-family: monospace; display: flex; flex-direction: column; gap: 2px;">
+              <div style="display: flex; justify-content: space-between;">
+                <span>(+) Comissão de Viagem Calculada (Valor Real):</span>
+                <span style="font-weight: bold;">R$ ${settlement.basicCommission.toFixed(2)}</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; color: #b91c1c;">
+                <span>(-) Desconto de Avarias / Perdas:</span>
+                <span>- R$ ${settlement.avariaDeduction.toFixed(2)}</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; color: #b91c1c;">
+                <span>(-) Desconto de Falta de Caixa:</span>
+                <span>- R$ ${settlement.shortageDeduction.toFixed(2)}</span>
+              </div>
+              <hr style="border: none; border-top: 1px solid #cbd5e1; margin: 3px 0;" />
+              <div style="display: flex; justify-content: space-between; font-weight: bold; color: #15803d; font-size: 9px;">
+                <span>(=) VALOR REAL RECEBIDO (COMISSÃO LÍQUIDA):</span>
+                <span>R$ ${settlement.finalCommission.toFixed(2)}</span>
+              </div>
+            </div>
+
+            <div style="display: flex; justify-content: space-between; align-items: flex-end; margin-top: 15px;">
+              <div style="font-size: 9px; color: #475569; font-weight: 600;">
+                Data de Emissão: _____/_____/_________
+              </div>
+              <div style="width: 220px; text-align: center;">
+                <div style="border-top: 1px solid #475569; padding-top: 2px; font-size: 9px; font-weight: bold; text-transform: uppercase; color: #1e293b; margin-top: 45px;">
+                  ${settlement.driverName}<br/>
+                  <span style="font-weight: normal; color: #64748b; font-size: 8px; text-transform: none;">Motorista (Beneficiário)</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <div style="margin-top: 15px; text-align: center; font-size: 8px; color: #94a3b8; font-weight: 500;">
+            Documento gerado eletronicamente via Terrasul envasadora de bebidas Ltda.
+          </div>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
+    printWindow.print();
+  };
+
+  const handlePrintCaixa = (settlement: DriverSettlement) => {
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) return;
+
+    printWindow.document.write(`
+      <html>
+        <head>
+          <title>Recibo de Caixa - ${settlement.driverName}</title>
+          <style>
+            @page {
+              size: A5 landscape;
+              margin: 0.5cm;
+            }
+            body { 
+              font-family: system-ui, -apple-system, sans-serif; 
+              padding: 0; 
+              margin: 0; 
+              color: #1e293b; 
+              line-height: 1.4; 
+              font-size: 11px;
+            }
+            .container {
+              border: 2px solid #0f172a;
+              padding: 15px;
+              border-radius: 6px;
+              background-color: #fff;
+            }
+            .header { 
+              border-bottom: 2px solid #0f172a; 
+              padding-bottom: 6px; 
+              margin-bottom: 12px; 
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
+            }
+            .company { 
+              font-size: 12px; 
+              font-weight: 800; 
+              text-transform: uppercase; 
+              color: #0f172a; 
+            }
+            .title { 
+              font-size: 14px; 
+              font-weight: 900; 
+              text-transform: uppercase; 
+              color: #0f172a; 
+              border: 1.5px solid #0f172a;
+              padding: 4px 10px;
+              border-radius: 4px;
+              background-color: #f1f5f9;
+            }
+            .grid-2 { 
+              display: grid; 
+              grid-template-columns: 1fr 1fr; 
+              gap: 15px; 
+              margin-bottom: 12px; 
+            }
+            .info-box {
+              background-color: #f8fafc;
+              border: 1px solid #cbd5e1;
+              padding: 8px 12px;
+              border-radius: 4px;
+            }
+            .info-row {
+              display: flex;
+              justify-content: space-between;
+              margin-bottom: 4px;
+              font-size: 10px;
+            }
+            .info-label { 
+              font-weight: bold; 
+              color: #475569; 
+              text-transform: uppercase;
+              font-size: 8px;
+            }
+            .info-value { 
+              font-weight: 700; 
+              color: #0f172a; 
+            }
+            .amount-card {
+              border: 2px solid #16a34a;
+              background-color: #f0fdf4;
+              padding: 10px 15px;
+              border-radius: 6px;
+              text-align: center;
+              margin-bottom: 12px;
+            }
+            .amount-val {
+              font-size: 20px;
+              font-weight: 900;
+              color: #166534;
+              font-family: monospace;
+            }
+            .amount-words {
+              font-size: 10px;
+              font-weight: 700;
+              color: #166534;
+              font-style: italic;
+              margin-top: 2px;
+            }
+            .desc {
+              font-size: 10.5px;
+              text-align: justify;
+              margin-bottom: 25px;
+              color: #334155;
+            }
+            .signatures { 
+              display: grid; 
+              grid-template-columns: 1fr 1fr; 
+              gap: 30px; 
+              margin-top: 30px;
+            }
+            .sig-line { 
+              border-top: 1px solid #475569; 
+              padding-top: 4px; 
+              font-size: 9px; 
+              font-weight: bold; 
+              text-align: center; 
+              text-transform: uppercase; 
+              color: #1e293b; 
+            }
+            .footer {
+              margin-top: 15px;
+              text-align: center;
+              font-size: 8px;
+              color: #94a3b8;
+              font-weight: 500;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <div class="company">Terrasul envasadora de bebidas Ltda.</div>
+              <div class="title">Recibo de Caixa</div>
+            </div>
+            
+            <div class="grid-2">
+              <div class="info-box">
+                <div class="info-row">
+                  <span class="info-label">Motorista (Favorecido):</span>
+                  <span class="info-value">${settlement.driverName}</span>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">Placa / Veículo:</span>
+                  <span class="info-value">${settlement.plate}</span>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">ID do Acerto:</span>
+                  <span class="info-value">${settlement.id}</span>
+                </div>
+              </div>
+              <div class="info-box">
+                <div class="info-row">
+                  <span class="info-label">Data de Fechamento:</span>
+                  <span class="info-value">${new Date(settlement.dateSettlement).toLocaleDateString('pt-BR')}</span>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">Unidade:</span>
+                  <span class="info-value" style="text-transform: uppercase;">${settlement.unit || 'Matriz'}</span>
+                </div>
+                <div class="info-row">
+                  <span class="info-label">Período de Viagem:</span>
+                  <span class="info-value">${new Date(settlement.dateExit).toLocaleDateString('pt-BR')} a ${new Date(settlement.dateArrival).toLocaleDateString('pt-BR')}</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="amount-card">
+              <div class="info-label" style="color: #166534; font-size: 9px; margin-bottom: 2px;">Valor a Receber (Comissão Líquida)</div>
+              <div class="amount-val">R$ ${settlement.finalCommission.toFixed(2)}</div>
+              <div class="amount-words">(${valorPorExtenso(settlement.finalCommission)})</div>
+            </div>
+            
+            <div class="desc">
+              Autorizo o caixa a efetuar o pagamento da importância acima descrita ao motorista <strong>${settlement.driverName}</strong>, correspondente ao saldo líquido de comissão de viagem apurada após a devida prestação de contas de vendas, despesas de viagem e desconto de avarias/faltas.
+            </div>
+            
+            <div class="signatures">
+              <div>
+                <div class="sig-line" style="margin-top: 45px;">
+                  ${settlement.driverName}<br/>
+                  <span style="font-weight: normal; color: #64748b; font-size: 8px; text-transform: none;">Assinatura do Motorista</span>
+                </div>
+              </div>
+              <div>
+                <div class="sig-line" style="margin-top: 45px;">
+                  ${currentUser?.name || 'Conferente'}<br/>
+                  <span style="font-weight: normal; color: #64748b; font-size: 8px; text-transform: none;">Assinatura do Conferente (Operador do Sistema)</span>
+                </div>
+              </div>
+            </div>
+            
+            <div class="footer">
+              Recibo emitido eletronicamente via sistema Terrasul em ${new Date().toLocaleString('pt-BR')}.
+            </div>
+          </div>
+        </body>
+      </html>
+    `);
+    printWindow.document.close();
+    printWindow.print();
+  };
+
+  return (
+    <div className="p-6 space-y-6 flex-1 overflow-auto h-full bg-slate-50">
+      
+      {/* View Title */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-5">
+        <div className="flex items-center space-x-3">
+          <div className="bg-blue-600 p-2.5 rounded-lg text-white shadow">
+            <Receipt size={24} />
+          </div>
+          <div>
+            <h1 className="text-xl font-bold text-slate-950">Prestação de Contas (Acertos)</h1>
+            <p className="text-xs text-slate-500 font-medium">Controle de saídas, acertos de carga, conciliação e comissão de veículos próprios.</p>
+          </div>
+        </div>
+
+        {/* View Selection Bar */}
+        <div className="flex bg-slate-200/80 p-1 rounded-lg self-start">
+          <button
+            onClick={() => { setSelectedMovement(null); setActiveSubTab('pending_movements'); }}
+            className={`px-4 py-2 rounded-md text-xs font-bold transition-all ${
+              activeSubTab === 'pending_movements' && !selectedMovement
+                ? 'bg-white text-slate-800 shadow-sm'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            Aguardando Acerto ({movementsPendingSettlement.length})
+          </button>
+          <button
+            onClick={() => { setSelectedMovement(null); setActiveSubTab('history'); }}
+            className={`px-4 py-2 rounded-md text-xs font-bold transition-all ${
+              activeSubTab === 'history'
+                ? 'bg-white text-slate-800 shadow-sm'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            Histórico de Acertos ({driverSettlements.length})
+          </button>
+          <button
+            onClick={() => { setSelectedMovement(null); setActiveSubTab('bank_reconciliation'); }}
+            className={`px-4 py-2 rounded-md text-xs font-bold transition-all ${
+              activeSubTab === 'bank_reconciliation'
+                ? 'bg-white text-slate-800 shadow-sm'
+                : 'text-slate-600 hover:text-slate-900'
+            }`}
+          >
+            Conciliação PIX Bancário ({bankTransactions.filter(b => !b.isReconciled).length})
+          </button>
+        </div>
+      </div>
+
+      {/* ERROR DISPLAY */}
+      {formError && (
+        <div className="p-4 bg-rose-50 border-l-4 border-rose-500 text-rose-800 rounded shadow-sm flex items-center space-x-2 text-xs font-medium">
+          <ShieldAlert size={16} className="text-rose-600" />
+          <span>{formError}</span>
+        </div>
+      )}
+
+      {/* SUB-TABS LOGIC */}
+      {!selectedMovement && activeSubTab === 'pending_movements' && (
+        <div className="space-y-4">
+          <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 flex items-start space-x-3">
+            <Info size={18} className="text-amber-600 mt-0.5" />
+            <div className="text-xs text-amber-800 leading-relaxed font-medium">
+              <p className="font-bold mb-1">Regras de Negócio Importantes:</p>
+              <ul className="list-disc pl-4 space-y-1">
+                <li>O módulo de Prestação de Contas é exclusivo para <strong>veículos próprios</strong> da empresa.</li>
+                <li>Os produtos e valores começam zerados e devem ser preenchidos manualmente pelo conferente.</li>
+                <li>Qualquer avaria ou perda informada é <strong>descontada integralmente</strong> da comissão do motorista.</li>
+                <li>Se o valor entregue for menor do que o esperado (Vendas - Despesas), a diferença de caixa (falta) também é <strong>descontada do motorista</strong>.</li>
+                <li>Se o valor entregue for maior, a sobra pertence à empresa e não é acrescida à comissão.</li>
+              </ul>
+            </div>
+          </div>
+
+          {/* VEÍCULOS EM VIAGEM (ADIANTAMENTO DE SAÍDA) */}
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Truck size={16} className="text-slate-600" />
+                <h2 className="text-xs font-bold text-slate-800 uppercase tracking-tight">Veículos em Viagem (Adiantamentos de Saída)</h2>
+              </div>
+              <span className="text-[10px] font-bold uppercase tracking-wider bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">
+                {activeTripsOnRoad.length} veículos em viagem
+              </span>
+            </div>
+
+            {activeTripsOnRoad.length === 0 ? (
+              <div className="p-8 text-center text-slate-400 text-xs">
+                Nenhum veículo próprio ou terceirizado em viagem no momento.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold text-[10px] uppercase">
+                      <th className="p-4">Placa / Veículo</th>
+                      <th className="p-4">Motorista</th>
+                      <th className="p-4">Saída da Empresa</th>
+                      <th className="p-4">Adiantamentos Lançados</th>
+                      <th className="p-4 text-right">Ação</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                    {activeTripsOnRoad.map(mov => {
+                      const totalAdvancesVal = mov.cashAdvances?.reduce((sum, adv) => sum + adv.value, 0) || 0;
+                      return (
+                        <tr key={mov.id} className="hover:bg-slate-50 transition-colors">
+                          <td className="p-4">
+                            <div className="flex items-center space-x-2">
+                              <span className="font-mono bg-slate-100 px-2 py-0.5 rounded text-slate-700 font-bold border border-slate-200 uppercase">
+                                {mov.plate}
+                              </span>
+                              <span className="text-[10px] text-slate-400 font-semibold italic">
+                                ({isProprioMovement(mov) ? 'Próprio' : 'Terceiro'})
+                              </span>
+                            </div>
+                          </td>
+                          <td className="p-4">
+                            <span className="font-semibold">{mov.driver}</span>
+                          </td>
+                          <td className="p-4 text-slate-500">
+                            {new Date(mov.timestamp).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}
+                          </td>
+                          <td className="p-4">
+                            {totalAdvancesVal > 0 ? (
+                              <div className="space-y-1">
+                                <span className="text-emerald-600 font-bold">R$ {totalAdvancesVal.toFixed(2)}</span>
+                                <div className="text-[9px] text-slate-400 font-normal">
+                                  {mov.cashAdvances?.map(a => `${a.reason} (R$ ${a.value})`).join(', ')}
+                                </div>
+                              </div>
+                            ) : (
+                              <span className="text-slate-400 italic">Nenhum</span>
+                            )}
+                          </td>
+                          <td className="p-4 text-right">
+                            <button
+                              onClick={() => {
+                                setCashAdvanceMovement(mov);
+                                setCashAdvanceModalOpen(true);
+                              }}
+                              className="inline-flex items-center gap-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 hover:text-emerald-800 px-2.5 py-1 rounded text-[11px] font-bold transition-all border border-emerald-200"
+                            >
+                              <Coins size={12} />
+                              Adiantar Caixa
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
+              <h2 className="text-xs font-bold text-slate-800 uppercase tracking-tight">Cargas de Veículos Próprios Prontas para Acerto</h2>
+              <span className="text-[10px] font-bold uppercase tracking-wider bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full">
+                {movementsPendingSettlement.length} cargas pendentes
+              </span>
+            </div>
+
+            {movementsPendingSettlement.length === 0 ? (
+              <div className="p-12 text-center">
+                <div className="inline-flex p-3 bg-slate-100 rounded-full text-slate-400 mb-3">
+                  <CheckCircle2 size={24} />
+                </div>
+                <h3 className="text-sm font-bold text-slate-800">Tudo em dia!</h3>
+                <p className="text-xs text-slate-400 mt-1 max-w-md mx-auto">Nenhuma carga pendente de acerto financeiro para motoristas com veículo próprio no pátio neste momento.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold text-[10px] uppercase">
+                      <th className="p-4">Placa / Veículo</th>
+                      <th className="p-4">Motorista</th>
+                      <th className="p-4">Etapa Atual</th>
+                      <th className="p-4">Data Entrada</th>
+                      <th className="p-4 text-right">Ação</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                    {movementsPendingSettlement.map(mov => {
+                      const retMov = getReturnMovement(mov);
+                      const currentStep = retMov?.kanbanStep || 'aguardando_descarregamento';
+                      const isUnloaded = retMov 
+                        ? (retMov.type === 'saida' || retMov.bypassProduction || (currentStep !== 'aguardando_descarregamento' && currentStep !== 'descarregamento')) 
+                        : false; // If not returned, it cannot be settled
+                      const hasDraft = driverSettlements.some(ds => 
+                        ds.status === 'pending' && (ds.movementId === mov.id || ds.movementId === `settled-${mov.id}`)
+                      );
+                      return (
+                        <tr key={mov.id} className="hover:bg-slate-50">
+                          <td className="p-4 font-bold text-slate-900">{mov.plate}</td>
+                          <td className="p-4">
+                            <div>{mov.driver}</div>
+                            {mov.cashAdvances && mov.cashAdvances.length > 0 && (
+                              <div className="mt-1 flex flex-wrap gap-1">
+                                {mov.cashAdvances.map(adv => (
+                                  <button
+                                    key={adv.id}
+                                    onClick={() => handlePrintCashAdvance({
+                                      id: adv.id,
+                                      movementId: mov.id,
+                                      driverName: mov.driver,
+                                      plate: mov.plate,
+                                      value: adv.value,
+                                      reason: adv.reason,
+                                      timestamp: adv.timestamp,
+                                      operator: adv.operator
+                                    })}
+                                    className="bg-emerald-50 text-emerald-700 border border-emerald-200 text-[9px] font-bold px-1.5 py-0.5 rounded flex items-center gap-1 hover:bg-emerald-100 transition-colors cursor-pointer"
+                                    title="Clique para re-imprimir o comprovante"
+                                  >
+                                    <Coins size={10} /> R$ {adv.value.toFixed(2)} ({adv.reason})
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </td>
+                          <td className="p-4">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className={`px-2 py-0.5 text-[10px] font-bold rounded uppercase ${
+                                isUnloaded ? 'bg-blue-50 text-blue-700' : 'bg-amber-50 text-amber-700 animate-pulse'
+                              }`}>
+                                {!retMov 
+                                  ? 'Não Retornado' 
+                                  : (retMov.bypassProduction 
+                                    ? 'Fila Dispensada' 
+                                    : (currentStep === 'aguardando_descarregamento' 
+                                      ? 'Aguardando Descarregamento' 
+                                      : (currentStep === 'descarregamento' 
+                                        ? 'Descarregando' 
+                                        : 'Descarregado')))}
+                              </span>
+                              {hasDraft && (
+                                <span className="px-2 py-0.5 text-[10px] font-extrabold rounded uppercase bg-amber-100 text-amber-800 border border-amber-200">
+                                  Rascunho Parcial
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="p-4 text-slate-500">
+                            {new Date(mov.entryTimestamp || mov.timestamp).toLocaleString('pt-BR')}
+                          </td>
+                          <td className="p-4 text-right font-sans flex items-center justify-end gap-2">
+                            <button
+                              onClick={() => handleStartSettlement(mov)}
+                              disabled={!retMov || !isUnloaded}
+                              className={`inline-flex items-center space-x-1 px-3 py-1.5 text-[11px] font-bold uppercase rounded shadow transition ${
+                                !retMov || !isUnloaded
+                                  ? 'bg-slate-100 text-slate-400 border border-slate-200 shadow-none cursor-not-allowed'
+                                  : (hasDraft
+                                    ? 'bg-amber-600 hover:bg-amber-700 text-white hover:shadow-md cursor-pointer'
+                                    : 'bg-blue-600 hover:bg-blue-700 text-white hover:shadow-md cursor-pointer')
+                              }`}
+                              title={
+                                !retMov
+                                  ? 'Aguarde o retorno do veículo para realizar o acerto'
+                                  : (!isUnloaded
+                                    ? 'Aguarde a conclusão do descarregamento para realizar o acerto'
+                                    : (hasDraft ? 'Continuar rascunho de acerto' : 'Iniciar acerto de contas'))
+                              }
+                            >
+                              <span>{hasDraft ? 'Continuar' : 'Acertar'}</span>
+                              <ArrowRight size={12} />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ACTIVE SETTLEMENT FORM SCREEN */}
+      {selectedMovement && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          
+          {/* Form Side - Inputs */}
+          <div className="lg:col-span-2 space-y-6">
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 space-y-6">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <h2 className="text-sm font-bold text-slate-800 uppercase tracking-tight flex items-center gap-1.5">
+                  <Receipt size={16} className="text-blue-600" />
+                  Acerto da Carga: <span className="text-blue-600">{selectedMovement.plate}</span> - {selectedMovement.driver}
+                </h2>
+                <button
+                  onClick={() => setSelectedMovement(null)}
+                  className="p-1 hover:bg-slate-100 rounded text-slate-400 hover:text-slate-600 cursor-pointer"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {/* Basic Fields */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Data de Saída</label>
+                  <input
+                    type="text"
+                    disabled
+                    value={new Date(selectedMovement.exitTimestamp || selectedMovement.entryTimestamp || selectedMovement.timestamp).toLocaleString('pt-BR')}
+                    className="w-full bg-slate-50 border border-slate-200 rounded text-xs p-2.5 font-bold text-slate-500 outline-none cursor-not-allowed"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Data de Chegada (Retorno)</label>
+                  <input
+                    type="datetime-local"
+                    required
+                    value={dateArrival}
+                    onChange={e => setDateArrival(e.target.value)}
+                    className="w-full bg-white border border-slate-200 rounded text-xs p-2.5 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Comissão Definida (%)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.1"
+                    value={commissionPercent}
+                    onChange={e => setCommissionPercent(parseFloat(e.target.value) || 0)}
+                    className="w-full bg-white border border-slate-200 rounded text-xs p-2.5 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 font-bold"
+                  />
+                </div>
+              </div>
+
+        {/* Sales Section (Starts Zeroed) */}
+        <div className="space-y-4">
+          <div className="border-b border-slate-100 pb-2 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <div>
+              <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider">1. Produtos Vendidos / Carga de Saída</h3>
+              <p className="text-[10px] text-slate-400 font-semibold uppercase mt-0.5">Informe as quantidades e valores unitários das vendas realizadas.</p>
+            </div>
+            {(suggestedWaterQty > 0 || currentTargetVasilhameQty > 0) && (
+              <button
+                type="button"
+                onClick={handleAutoFillSuggestions}
+                className="px-2.5 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded text-[10px] font-bold uppercase tracking-wider transition flex items-center gap-1 cursor-pointer self-start sm:self-center"
+                title="Preencher com base nos vasilhames descarregados"
+              >
+                <CheckCircle2 size={12} className="text-blue-600" />
+                <span>Sugerir Qtds ({suggestedWaterQty} Águas / {currentTargetVasilhameQty} Vasilhames)</span>
+              </button>
+            )}
+          </div>
+
+          {/* Real-time Launch Balance Tracker */}
+          {(() => {
+            const enteredWaterQty = sales
+              .filter(s => s.item.toLowerCase().includes('água') || s.item.toLowerCase().includes('agua') || s.item.toLowerCase().includes('bonifica'))
+              .reduce((sum, s) => sum + s.qty, 0);
+            const enteredVasilhameQty = sales
+              .filter(s => s.item.toLowerCase().includes('vasilhame') && !s.item.toLowerCase().includes('retorno'))
+              .reduce((sum, s) => sum + s.qty, 0);
+
+            const waterDiff = suggestedWaterQty - enteredWaterQty;
+            const vasilhameDiff = currentTargetVasilhameQty - enteredVasilhameQty;
+
+            return (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 bg-slate-50 border border-slate-200/60 rounded-lg p-3 text-xs">
+                {/* Water Balance */}
+                <div className="bg-white rounded p-2.5 border border-slate-150 flex flex-col justify-between">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="font-bold text-slate-700">💧 Vendas + Bonificações de Água 20L:</span>
+                    <span className="text-[10px] uppercase font-bold text-slate-400">Meta/Vendido: {suggestedWaterQty} un</span>
+                  </div>
+                  <div className="flex justify-between items-center mt-1">
+                    <span className="text-[11px] font-semibold text-slate-500">Lançado: <strong className="text-slate-800">{enteredWaterQty} un</strong></span>
+                    {waterDiff > 0 ? (
+                      <span className="bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded text-[10px] font-black border border-amber-200">
+                        Faltam: {waterDiff} un
+                      </span>
+                    ) : waterDiff < 0 ? (
+                      <span className="bg-rose-50 text-rose-700 px-1.5 py-0.5 rounded text-[10px] font-black border border-rose-200">
+                        Excesso: {Math.abs(waterDiff)} un
+                      </span>
+                    ) : (
+                      <span className="bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded text-[10px] font-black border border-emerald-200 inline-flex items-center gap-1">
+                        <Check size={10} /> Conciliado
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Vasilhame Balance */}
+                <div className="bg-white rounded p-2.5 border border-slate-150 flex flex-col justify-between">
+                  <div className="flex justify-between items-center mb-1">
+                    <span className="font-bold text-slate-700">🪣 Vendas + Comodatos de Vasilhame:</span>
+                    <span className="text-[10px] uppercase font-bold text-slate-400">Meta/Vendido: {currentTargetVasilhameQty} un</span>
+                  </div>
+                  <div className="flex justify-between items-center mt-1">
+                    <span className="text-[11px] font-semibold text-slate-500">Lançado: <strong className="text-slate-800">{enteredVasilhameQty} un</strong></span>
+                    {vasilhameDiff > 0 ? (
+                      <span className="bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded text-[10px] font-black border border-amber-200">
+                        Faltam: {vasilhameDiff} un
+                      </span>
+                    ) : vasilhameDiff < 0 ? (
+                      <span className="bg-rose-50 text-rose-700 px-1.5 py-0.5 rounded text-[10px] font-black border border-rose-200">
+                        Excesso: {Math.abs(vasilhameDiff)} un
+                      </span>
+                    ) : (
+                      <span className="bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded text-[10px] font-black border border-emerald-200 inline-flex items-center gap-1">
+                        <Check size={10} /> Conciliado
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Vasilhame Shortage Control */}
+                {missingBottlesQty > 0 && (
+                  <div className="bg-indigo-50/40 border border-indigo-150 rounded-lg p-3 text-xs md:col-span-2 flex flex-col gap-2">
+                    <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center border-b border-indigo-100 pb-1.5 gap-1">
+                      <span className="font-bold text-indigo-950 uppercase tracking-wide flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-indigo-500 shrink-0" />
+                        Conciliação de Diferenças de Vasilhames
+                      </span>
+                      <span className="font-bold font-mono text-[11px] text-indigo-900 bg-indigo-100/80 px-2.5 py-0.5 rounded-full self-start sm:self-auto">
+                        Falta Original na Carga: {missingBottlesQty} un
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-1">
+                      <div className="bg-white p-2 rounded border border-slate-150 text-slate-700">
+                        <span className="block text-[9px] uppercase font-bold text-slate-400">Lançado como Venda:</span>
+                        <strong className="text-slate-800 text-sm font-mono">{vendaVasilhameQty} un</strong>
+                      </div>
+                      <div className="bg-white p-2 rounded border border-slate-150 text-slate-700">
+                        <span className="block text-[9px] uppercase font-bold text-slate-400">Lançado como Comodato:</span>
+                        <strong className="text-indigo-700 text-sm font-mono">{comodatoVasilhameQty} un</strong>
+                      </div>
+                      <div className="p-2 rounded border flex flex-col justify-center bg-white border-indigo-200">
+                        <span className="block text-[9px] uppercase font-bold text-indigo-600">Diferença Restante (Falta Real):</span>
+                        {Math.max(0, missingBottlesQty - vendaVasilhameQty - comodatoVasilhameQty) === 0 ? (
+                          <strong className="text-emerald-700 text-sm font-mono flex items-center gap-1">
+                            <Check size={14} /> Totalmente Justificado!
+                          </strong>
+                        ) : (
+                          <strong className="text-rose-700 text-sm font-mono">
+                            {Math.max(0, missingBottlesQty - vendaVasilhameQty - comodatoVasilhameQty)} un faltantes
+                          </strong>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
+
+          {/* Inline add sale form */}
+          <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-xs space-y-4">
+            <div className="flex items-center gap-2 border-b pb-2">
+              <span className="p-1.5 bg-indigo-50 text-indigo-700 rounded-lg">
+                <Receipt size={16} />
+              </span>
+              <div>
+                <h4 className="text-xs font-extrabold uppercase text-slate-800 tracking-wider">
+                  Lançar Nova Venda Manualmente (Esquecida pelo Motorista)
+                </h4>
+                <p className="text-[10px] text-slate-400 font-medium">
+                  Registre as vendas que o motorista deixou de lançar no aplicativo com busca refinada e multi-pagamento.
+                </p>
+              </div>
+            </div>
+
+            {/* 1. Search and Select Client */}
+            <div className="relative">
+              <label className="block text-[9px] font-black uppercase text-slate-500 mb-1">
+                1. Cliente / Destinatário (Nome, Apelido, Código ou CPF/CNPJ) *
+              </label>
+              <div className="relative">
+                <input 
+                  type="text" 
+                  required 
+                  value={manualSaleClientName} 
+                  onChange={e => {
+                    setManualSaleClientName(e.target.value);
+                    setShowManualSaleClientDropdown(true);
+                  }} 
+                  onFocus={() => setShowManualSaleClientDropdown(true)}
+                  onBlur={() => setTimeout(() => setShowManualSaleClientDropdown(false), 200)}
+                  className="w-full text-xs p-2.5 border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none bg-slate-50 hover:bg-slate-50/50 font-bold text-slate-800 placeholder:text-slate-400 pr-8 transition-all" 
+                  placeholder="Pesquise por Código, CNPJ, Nome, Fantasia..." 
+                />
+                {manualSaleClientName && (
+                  <button
+                    type="button"
+                    onClick={() => setManualSaleClientName('')}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer font-bold text-sm"
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+              {showManualSaleClientDropdown && (
+                <div className="absolute z-50 left-0 right-0 mt-1 max-h-60 overflow-y-auto bg-white border border-slate-200 rounded-lg shadow-lg divide-y divide-slate-100">
+                  {(() => {
+                    const query = manualSaleClientName.toLowerCase().trim();
+                    const filteredDropdownClients = registeredClients
+                      .filter(c => {
+                        if (!query || query === 'consumidor geral') return true;
+                        const nameMatch = c.name.toLowerCase().includes(query);
+                        const codeMatch = c.codigo ? c.codigo.toLowerCase().includes(query) : false;
+                        const fantasyMatch = c.apelidoFantasia ? c.apelidoFantasia.toLowerCase().includes(query) : false;
+                        const cpfCnpjMatch = c.cpfCnpj ? c.cpfCnpj.toLowerCase().includes(query) : false;
+                        return nameMatch || codeMatch || fantasyMatch || cpfCnpjMatch;
+                      })
+                      .sort((a, b) => {
+                        const codeA = parseInt(a.codigo || '', 10);
+                        const codeB = parseInt(b.codigo || '', 10);
+                        const isANum = !isNaN(codeA) && /^\d+$/.test((a.codigo || '').trim());
+                        const isBNum = !isNaN(codeB) && /^\d+$/.test((b.codigo || '').trim());
+                        if (isANum && isBNum) {
+                          return codeA - codeB;
+                        }
+                        if (isANum) return -1;
+                        if (isBNum) return 1;
+                        const valA = a.codigo || '';
+                        const valB = b.codigo || '';
+                        if (valA || valB) {
+                          return valA.localeCompare(valB, undefined, { numeric: true, sensitivity: 'base' });
+                        }
+                        return a.name.localeCompare(b.name);
+                      });
+
+                    return (
+                      <>
+                        {filteredDropdownClients.slice(0, 50).map(c => (
+                          <div
+                            key={c.id}
+                            onMouseDown={() => {
+                              setManualSaleClientName(c.name);
+                              setShowManualSaleClientDropdown(false);
+                            }}
+                            className="p-2 hover:bg-indigo-50 cursor-pointer text-xs space-y-0.5 text-left"
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="font-bold text-slate-800">{c.name}</span>
+                              {c.codigo && (
+                                <span className="bg-slate-100 text-slate-600 text-[9px] px-1 rounded font-mono font-bold">
+                                  #{c.codigo}
+                                </span>
+                              )}
+                            </div>
+                            {c.apelidoFantasia && (
+                              <div className="text-[10px] text-slate-500 italic">
+                                Fantasia: {c.apelidoFantasia}
+                              </div>
+                            )}
+                            <div className="flex flex-wrap gap-2 text-[9px] text-slate-400 font-mono">
+                              {c.cpfCnpj && <span>{c.personType === 'fisica' ? 'CPF' : 'CNPJ'}: {c.cpfCnpj}</span>}
+                              {c.cidade && <span>🏙️ {c.cidade}-{c.uf}</span>}
+                            </div>
+                          </div>
+                        ))}
+                        {filteredDropdownClients.length === 0 && (
+                          <div className="p-3 text-xs text-slate-400 italic text-center">
+                            Nenhum cliente cadastrado com este filtro.
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
+                </div>
+              )}
+            </div>
+
+            {/* 2. Add Product to Manual Cart */}
+            <form onSubmit={handleAddToManualCart} className="bg-slate-50/50 p-4 rounded-lg border border-slate-200/60 space-y-3">
+              <div className="text-[9px] font-black uppercase text-slate-500 tracking-wider">
+                2. Adicionar Produto ao Carrinho da Venda
+              </div>
+
+              {/* Product Selector buttons */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {[
+                  { type: 'agua', label: '💧 Água 20 Lts', desc: 'Garrafão cheio' },
+                  { type: 'vasilhame', label: '🪣 Vasilhame', desc: 'Venda de vasilhame' },
+                  { type: 'bonificacao', label: '🎁 Bonificação', desc: 'Custo zero' },
+                  { type: 'comodato', label: '🤝 Comodato', desc: 'Vasilhame emprestado' }
+                ].map((prod) => (
+                  <button
+                    key={prod.type}
+                    type="button"
+                    onClick={() => {
+                      setManualSaleProductType(prod.type as any);
+                      // Clear unit price when product is selected, so the user has to fill it manually!
+                      setManualSaleUnitPrice('');
+                    }}
+                    className={`p-2 rounded-lg text-left text-xs font-bold uppercase border transition-all ${
+                      manualSaleProductType === prod.type
+                        ? 'bg-indigo-50 border-indigo-400 text-indigo-700 shadow-3xs'
+                        : 'bg-white border-slate-200 text-slate-500 hover:bg-slate-50'
+                    }`}
+                  >
+                    <div className="font-extrabold text-[10px] tracking-wide leading-tight">{prod.label}</div>
+                    <div className="text-[8px] text-slate-400 lowercase normal-case leading-none mt-0.5 font-medium">{prod.desc}</div>
+                  </button>
+                ))}
+              </div>
+
+              {/* Qty and Unit Price Inputs */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-[9px] font-bold text-slate-500 uppercase block mb-1">Quantidade</label>
+                  <input 
+                    type="number" 
+                    min="0.01" 
+                    step="0.01"
+                    required 
+                    value={manualSaleQty} 
+                    onChange={e => {
+                      const val = e.target.value;
+                      setManualSaleQty(val === '' ? '' : Number(val));
+                    }} 
+                    className="w-full text-xs p-2 border border-slate-200 rounded focus:ring-2 focus:ring-indigo-500 outline-none bg-white font-bold text-slate-700" 
+                    placeholder="Ex: 5"
+                  />
+                </div>
+                <div>
+                  <label className="text-[9px] font-bold text-slate-500 uppercase block mb-1">Preço Unitário (R$)</label>
+                  <input 
+                    type="number" 
+                    step="0.01" 
+                    min="0" 
+                    required 
+                    disabled={manualSaleProductType === 'bonificacao' || manualSaleProductType === 'comodato'} 
+                    value={manualSaleProductType === 'bonificacao' || manualSaleProductType === 'comodato' ? '0' : manualSaleUnitPrice} 
+                    onChange={e => {
+                      const val = e.target.value;
+                      setManualSaleUnitPrice(val === '' ? '' : Number(val));
+                    }} 
+                    className={`w-full text-xs p-2 border border-slate-200 rounded focus:ring-2 focus:ring-indigo-500 outline-none ${
+                      manualSaleProductType === 'bonificacao' || manualSaleProductType === 'comodato'
+                        ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed font-medium'
+                        : 'bg-white font-bold text-slate-700'
+                    }`} 
+                    placeholder={manualSaleProductType === 'bonificacao' || manualSaleProductType === 'comodato' ? 'Grátis' : 'Digite o valor'}
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end">
+                <button 
+                  type="submit"
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg font-bold text-[10px] uppercase tracking-wider flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+                >
+                  <Plus size={14} /> Inserir no Carrinho
+                </button>
+              </div>
+            </form>
+
+            {/* 3. Manual Sale Shopping Cart List */}
+            {manualSaleCart.length > 0 && (
+              <div className="border border-slate-200 rounded-lg p-3 bg-white space-y-3">
+                <div className="flex justify-between items-center border-b pb-1.5">
+                  <span className="text-[9px] font-black text-slate-500 uppercase tracking-wider">
+                    3. Produtos no Carrinho (Venda Atual)
+                  </span>
+                  <span className="text-[9px] text-indigo-600 font-extrabold bg-indigo-50 px-2 py-0.5 rounded-full">
+                    {manualSaleCart.length} item(ns)
+                  </span>
+                </div>
+
+                <ul className="divide-y divide-slate-100 max-h-48 overflow-y-auto">
+                  {manualSaleCart.map((item, idx) => (
+                    <li key={idx} className="py-2 flex justify-between items-center text-xs">
+                      <div className="space-y-0.5">
+                        <span className="font-extrabold text-slate-800">{getManualProductDisplayName(item.productType)}</span>
+                        <div className="text-[10px] text-slate-400 font-semibold">
+                          {item.qty} un × R$ {item.unitPrice.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="font-extrabold text-slate-700">R$ {(item.qty * item.unitPrice).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                        <button 
+                          type="button" 
+                          onClick={() => handleRemoveFromManualCart(idx)} 
+                          className="text-red-500 p-1 bg-red-50 rounded hover:bg-red-100 transition-colors"
+                        >
+                          <X size={13} />
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+
+                {/* Cart Total */}
+                {(() => {
+                  const cartTotal = manualSaleCart.reduce((sum, item) => sum + (item.qty * item.unitPrice), 0);
+                  return (
+                    <>
+                      <div className="flex justify-between items-center bg-indigo-50 border border-indigo-100 p-2.5 rounded-lg text-slate-800">
+                        <span className="text-xs font-bold uppercase tracking-wider text-indigo-700">Total desta Venda:</span>
+                        <strong className="text-base font-black text-indigo-700 font-mono">
+                          R$ {cartTotal.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                        </strong>
+                      </div>
+
+                      {/* 4. Split/Multi Payment Forms */}
+                      {cartTotal > 0 && (
+                        <div className="bg-slate-50 p-4 rounded-lg border border-slate-200/70 space-y-3">
+                          <div className="text-[9px] font-black text-slate-500 uppercase tracking-wider">
+                            4. Distribuir Formas de Pagamento
+                          </div>
+
+                          {/* Real-time remaining manual payment balance helper */}
+                          {(() => {
+                            const valDinheiro = parseFloat(manualPayDinheiro) || 0;
+                            const valPix = parseFloat(manualPayPix) || 0;
+                            const valBoleto = parseFloat(manualPayBoleto) || 0;
+                            const valCheque = parseFloat(manualPayCheque) || 0;
+                            const valOutros = parseFloat(manualPayOutros) || 0;
+                            const totalPaidManual = valDinheiro + valPix + valBoleto + valCheque + valOutros;
+                            const diff = cartTotal - totalPaidManual;
+
+                            if (diff > 0.01) {
+                              return (
+                                <div className="text-[11px] font-bold uppercase text-amber-700 bg-amber-50 px-3 py-2 rounded-lg border border-amber-200/60 flex items-center gap-1.5 animate-pulse">
+                                  <AlertCircle size={15} />
+                                  <span>Falta preencher <strong className="font-mono text-xs">R$ {diff.toFixed(2)}</strong> para fechar o pagamento desta venda.</span>
+                                </div>
+                              );
+                            } else if (Math.abs(diff) < 0.01) {
+                              return (
+                                <div className="text-[11px] font-bold uppercase text-emerald-700 bg-emerald-50 px-3 py-2 rounded-lg border border-emerald-200/60 flex items-center gap-1.5">
+                                  <Check size={15} className="bg-emerald-100 rounded-full p-0.5" />
+                                  <span>Valor correto! Pagamento fechado. ✅</span>
+                                </div>
+                              );
+                            } else {
+                              return (
+                                <div className="text-[11px] font-bold uppercase text-blue-700 bg-blue-50 px-3 py-2 rounded-lg border border-blue-200/60 flex items-center gap-1.5">
+                                  <Info size={15} />
+                                  <span>Os valores informados superaram o total da venda em <strong className="font-mono text-xs">R$ {Math.abs(diff).toFixed(2)}</strong>.</span>
+                                </div>
+                              );
+                            }
+                          })()}
+
+                          <div className="space-y-2.5">
+                            {/* Dinheiro */}
+                            <div className="flex items-center gap-2">
+                              <span className="w-16 font-extrabold text-[11px] text-slate-500 uppercase">Dinheiro</span>
+                              <input 
+                                type="number" 
+                                step="0.01"
+                                placeholder="0.00" 
+                                value={manualPayDinheiro} 
+                                onChange={e => setManualPayDinheiro(e.target.value)} 
+                                className="flex-1 text-xs p-1.5 border border-slate-200 rounded font-bold text-slate-700 text-right bg-white focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
+                              />
+                              <button 
+                                type="button" 
+                                onClick={() => handleAutoFillManualPayment('dinheiro')}
+                                className="text-[9px] px-2 py-1.5 bg-white border border-slate-300 hover:border-indigo-400 text-slate-600 font-black rounded uppercase transition-colors"
+                              >
+                                Tudo
+                              </button>
+                            </div>
+
+                            {/* PIX */}
+                            <div className="flex items-center gap-2">
+                              <span className="w-16 font-extrabold text-[11px] text-slate-500 uppercase">PIX</span>
+                              <input 
+                                type="number" 
+                                step="0.01"
+                                placeholder="0.00" 
+                                value={manualPayPix} 
+                                onChange={e => setManualPayPix(e.target.value)} 
+                                className="flex-1 text-xs p-1.5 border border-slate-200 rounded font-bold text-slate-700 text-right bg-white focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
+                              />
+                              <button 
+                                type="button" 
+                                onClick={() => handleAutoFillManualPayment('pix')}
+                                className="text-[9px] px-2 py-1.5 bg-white border border-slate-300 hover:border-indigo-400 text-slate-600 font-black rounded uppercase transition-colors"
+                              >
+                                Tudo
+                              </button>
+                            </div>
+
+                            {/* Boleto */}
+                            <div className="flex items-center gap-2">
+                              <span className="w-16 font-extrabold text-[11px] text-slate-500 uppercase">Boleto</span>
+                              <input 
+                                type="number" 
+                                step="0.01"
+                                placeholder="0.00" 
+                                value={manualPayBoleto} 
+                                onChange={e => setManualPayBoleto(e.target.value)} 
+                                className="flex-1 text-xs p-1.5 border border-slate-200 rounded font-bold text-slate-700 text-right bg-white focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
+                              />
+                              <button 
+                                type="button" 
+                                onClick={() => handleAutoFillManualPayment('boleto')}
+                                className="text-[9px] px-2 py-1.5 bg-white border border-slate-300 hover:border-indigo-400 text-slate-600 font-black rounded uppercase transition-colors"
+                              >
+                                Tudo
+                              </button>
+                            </div>
+
+                            {/* Cheque */}
+                            <div className="flex items-center gap-2">
+                              <span className="w-16 font-extrabold text-[11px] text-slate-500 uppercase">Cheque</span>
+                              <input 
+                                type="number" 
+                                step="0.01"
+                                placeholder="0.00" 
+                                value={manualPayCheque} 
+                                onChange={e => setManualPayCheque(e.target.value)} 
+                                className="flex-1 text-xs p-1.5 border border-slate-200 rounded font-bold text-slate-700 text-right bg-white focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
+                              />
+                              <button 
+                                type="button" 
+                                onClick={() => handleAutoFillManualPayment('cheque')}
+                                className="text-[9px] px-2 py-1.5 bg-white border border-slate-300 hover:border-indigo-400 text-slate-600 font-black rounded uppercase transition-colors"
+                              >
+                                Tudo
+                              </button>
+                            </div>
+
+                            {/* Outros / A Prazo */}
+                            <div className="space-y-1 bg-white p-2.5 rounded border border-slate-200">
+                              <div className="flex items-center gap-2">
+                                <span className="w-16 font-extrabold text-[10px] text-slate-500 uppercase">A Prazo</span>
+                                <input 
+                                  type="number" 
+                                  step="0.01"
+                                  placeholder="0.00" 
+                                  value={manualPayOutros} 
+                                  onChange={e => setManualPayOutros(e.target.value)} 
+                                  className="flex-1 text-xs p-1.5 border border-slate-200 rounded font-bold text-slate-700 text-right focus:border-indigo-400 outline-none"
+                                />
+                                <button 
+                                  type="button" 
+                                  onClick={() => handleAutoFillManualPayment('outros')}
+                                  className="text-[9px] px-2 py-1.5 bg-white border border-slate-300 hover:border-indigo-400 text-slate-600 font-black rounded uppercase transition-colors"
+                                >
+                                  Tudo
+                                </button>
+                              </div>
+                              <input 
+                                type="text" 
+                                placeholder="Ex: Boleto faturado, carteira, prazo..." 
+                                value={manualPayOutrosNote} 
+                                onChange={e => setManualPayOutrosNote(e.target.value)} 
+                                className="w-full text-[10px] p-1 px-2 border border-slate-200 rounded font-semibold text-slate-600 bg-slate-50/50 outline-none focus:border-indigo-400"
+                              />
+                            </div>
+                          </div>
+
+                          {/* Finalize Button */}
+                          <div className="flex justify-end pt-2 border-t border-slate-200">
+                            <button
+                              type="button"
+                              onClick={handleFinalizeManualSale}
+                              className="px-5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[11px] font-black uppercase tracking-wider flex items-center gap-2 shadow-md transition-colors cursor-pointer"
+                            >
+                              <Check size={14} />
+                              Confirmar Venda e Registrar
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
+            )}
+          </div>
+
+                {/* Sales Table and Summary */}
+                <div className="space-y-4">
+                  {/* Sales Table Grouped by Client */}
+                  <div className="border border-slate-100 rounded overflow-hidden">
+                    <table className="w-full text-left text-xs">
+                      <thead>
+                        <tr className="bg-slate-100 text-[10px] text-slate-500 font-bold uppercase">
+                          <th className="p-3">Item / Produto</th>
+                          <th className="p-3 text-center w-28">Quantidade</th>
+                          <th className="p-3 text-right w-36">Valor Unitário</th>
+                          <th className="p-3 text-right w-32">Subtotal</th>
+                          <th className="p-3 text-center w-16">Ação</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 font-semibold text-slate-700">
+                        {(() => {
+                          if (sales.length === 0) {
+                            return (
+                              <tr>
+                                <td colSpan={5} className="p-6 text-center text-slate-400 uppercase tracking-wider text-[10px]">Nenhum produto de saída informado. A carga de saída começa zerada.</td>
+                              </tr>
+                            );
+                          }
+
+                          // Group sales by clientName
+                          const groups: Record<string, SettlementSale[]> = {};
+                          sales.forEach(s => {
+                            const client = (s.clientName || 'Carga Inicial (Vendas do App)').trim();
+                            if (!groups[client]) {
+                              groups[client] = [];
+                            }
+                            groups[client].push(s);
+                          });
+
+                          return Object.entries(groups).map(([clientName, clientSales]) => (
+                            <React.Fragment key={clientName}>
+                              {/* Group Header */}
+                              <tr className="bg-slate-50 font-extrabold text-slate-700 text-[10px] uppercase border-y border-slate-200/60">
+                                <td colSpan={5} className="p-2 pl-3 bg-slate-100/70">
+                                  <div className="flex items-center space-x-1.5">
+                                    <span className="text-slate-500">👤 CLIENTE:</span>
+                                    <span className="text-indigo-700 font-black text-[11px] tracking-wide">{clientName}</span>
+                                  </div>
+                                </td>
+                              </tr>
+                              {/* Client Sales rows */}
+                              {clientSales.map(s => (
+                                <tr key={s.id} className="hover:bg-slate-50/40">
+                                  <td className="p-3 pl-5 text-slate-900 font-bold">
+                                    <div className="flex flex-col">
+                                      <span>{s.item}</span>
+                                      {s.paymentMethodNote && (
+                                        <span className="text-[10px] text-emerald-600 font-extrabold uppercase mt-0.5">
+                                          💳 {s.paymentMethodNote}
+                                        </span>
+                                      )}
+                                      {s.paymentMethod && !s.paymentMethodNote && (
+                                        <span className="text-[10px] text-indigo-600 font-extrabold uppercase mt-0.5">
+                                          💳 Forma de Pagamento: {s.paymentMethod.toUpperCase()}
+                                        </span>
+                                      )}
+                                      {s.item.includes('Água 20 Lts') && suggestedWaterQty > 0 && !s.clientName && (
+                                        <span className="block text-[9px] text-slate-400 font-medium">Sugerido p/ descarrego: {suggestedWaterQty} un</span>
+                                      )}
+                                      {s.item === 'Vasilhame' && currentTargetVasilhameQty > 0 && !s.clientName && (
+                                        <span className="block text-[9px] text-slate-400 font-medium">Sugerido p/ descarrego: {currentTargetVasilhameQty} un</span>
+                                      )}
+                                    </div>
+                                  </td>
+                                  <td className="p-3 text-center">
+                                    <input
+                                      type="number"
+                                      min="0"
+                                      step="1"
+                                      className="w-20 text-center border border-slate-200 rounded p-1 bg-white outline-none focus:border-blue-400 font-bold text-xs"
+                                      value={s.qty || ''}
+                                      placeholder="0"
+                                      onChange={e => handleUpdateSaleQty(s.id, parseInt(e.target.value) || 0)}
+                                    />
+                                  </td>
+                                  <td className="p-3 text-right">
+                                    <div className="flex items-center justify-end">
+                                      <span className="text-slate-400 mr-1 text-[10px] font-bold">R$</span>
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        step="0.01"
+                                        className="w-24 text-right border border-slate-200 rounded p-1 bg-white outline-none focus:border-blue-400 font-bold text-xs"
+                                        value={s.value || ''}
+                                        placeholder="0.00"
+                                        onChange={e => handleUpdateSaleValue(s.id, parseFloat(e.target.value) || 0)}
+                                      />
+                                    </div>
+                                  </td>
+                                  <td className="p-3 text-right font-black text-slate-900">
+                                    R$ {(s.qty * s.value).toFixed(2)}
+                                  </td>
+                                  <td className="p-3 text-center">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRemoveSale(s.id)}
+                                      className="p-1 hover:text-red-600 text-slate-400 transition cursor-pointer"
+                                    >
+                                      <Trash2 size={14} />
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </React.Fragment>
+                          ));
+                        })()}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Summary of Sales by Payment Method and Products */}
+                  {sales.length > 0 && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-slate-50/70 p-4 rounded-lg border border-slate-200/60">
+                      {/* Products Summary */}
+                      <div className="space-y-2">
+                        <h4 className="text-[10px] font-black text-slate-600 uppercase tracking-wider border-b pb-1">Venda Total de Produtos</h4>
+                        <div className="space-y-1.5">
+                          {(() => {
+                            const prodTotals = calculateSalesProductTotals(sales);
+                            return Object.entries(prodTotals).map(([name, qty]) => (
+                              <div key={name} className="flex justify-between text-xs font-bold text-slate-700 bg-white p-2 rounded border border-slate-100 shadow-3xs">
+                                <span>{name}</span>
+                                <span className="font-mono text-slate-900 bg-slate-100 px-2 py-0.5 rounded text-[11px] font-black">{qty} un</span>
+                              </div>
+                            ));
+                          })()}
+                        </div>
+                      </div>
+
+                      {/* Payment Methods Summary */}
+                      <div className="space-y-2">
+                        <h4 className="text-[10px] font-black text-slate-600 uppercase tracking-wider border-b pb-1">Total de Vendas por Forma de Pagamento</h4>
+                        <div className="space-y-1.5">
+                          {(() => {
+                            const payTotals = calculateSalesPaymentBreakdown(sales);
+                            const activeForms = [
+                              { label: 'Dinheiro', val: payTotals.dinheiro, color: 'text-emerald-700 bg-emerald-50' },
+                              { label: 'PIX', val: payTotals.pix, color: 'text-blue-700 bg-blue-50' },
+                              { label: 'Boleto', val: payTotals.boleto, color: 'text-amber-700 bg-amber-50' },
+                              { label: 'Cheque', val: payTotals.cheque, color: 'text-purple-700 bg-purple-50' },
+                              { label: 'A Prazo', val: payTotals.outros, color: 'text-rose-700 bg-rose-50' },
+                            ].filter(f => f.val > 0);
+
+                            if (activeForms.length === 0) {
+                              return <div className="text-xs text-slate-400 italic font-semibold p-2">Nenhum valor cobrado.</div>;
+                            }
+
+                            return activeForms.map(f => (
+                              <div key={f.label} className="flex justify-between text-xs font-bold text-slate-700 bg-white p-2 rounded border border-slate-100 shadow-3xs">
+                                <span>{f.label}</span>
+                                <span className={`font-mono px-2 py-0.5 rounded text-[11px] font-black ${f.color}`}>R$ {f.val.toFixed(2)}</span>
+                              </div>
+                            ));
+                          })()}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Expenses Section */}
+              <div className="space-y-4">
+                <div className="border-b border-slate-100 pb-2 flex items-center justify-between">
+                  <div>
+                    <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider">2. Despesas Diversas da Viagem</h3>
+                    <p className="text-[10px] text-slate-400 font-semibold uppercase mt-0.5">Informe pedágios, alimentação, reparos emergenciais pagos.</p>
+                  </div>
+                </div>
+
+                {/* Inline add expense form */}
+                <form onSubmit={handleAddExpense} className="grid grid-cols-1 md:grid-cols-3 gap-2 items-end bg-slate-50 p-3 rounded">
+                  <div className="md:col-span-2">
+                    <label className="block text-[9px] font-black uppercase text-slate-500 mb-1">Descrição da Despesa</label>
+                    <input
+                      type="text"
+                      placeholder="Ex: Pedágio Rodovia SP-330"
+                      required
+                      value={newExpenseItem}
+                      onChange={e => setNewExpenseItem(e.target.value)}
+                      className="w-full bg-white border border-slate-200 rounded text-xs p-2 outline-none font-semibold focus:border-blue-400"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[9px] font-black uppercase text-slate-500 mb-1">Valor</label>
+                    <div className="relative">
+                      <span className="absolute left-2.5 top-2.5 text-[10px] text-slate-400 font-bold">R$</span>
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.01"
+                        required
+                        value={newExpenseValue || ''}
+                        onChange={e => setNewExpenseValue(parseFloat(e.target.value) || 0)}
+                        className="w-full bg-white border border-slate-200 pl-7 pr-2 py-2 rounded text-xs outline-none font-bold focus:border-blue-400"
+                      />
+                    </div>
+                  </div>
+                  <div className="md:col-span-3 flex justify-end">
+                    <button
+                      type="submit"
+                      className="px-4 py-1.5 bg-slate-800 text-white rounded text-[11px] font-bold uppercase tracking-wider flex items-center space-x-1.5 hover:bg-slate-900 transition cursor-pointer"
+                    >
+                      <Plus size={14} />
+                      <span>Inserir Despesa</span>
+                    </button>
+                  </div>
+                </form>
+
+                {/* Expenses Table */}
+                <div className="border border-slate-100 rounded overflow-hidden">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="bg-slate-100 text-[10px] text-slate-500 font-bold uppercase">
+                        <th className="p-3">Descrição</th>
+                        <th className="p-3 text-right w-36">Valor</th>
+                        <th className="p-3 text-center w-16">Ação</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 font-semibold text-slate-700">
+                      {expenses.map(e => (
+                        <tr key={e.id} className="hover:bg-slate-50/50">
+                          <td className="p-3 text-slate-900 font-bold">{e.item}</td>
+                          <td className="p-3 text-right">
+                            <div className="flex items-center justify-end">
+                              <span className="text-slate-400 mr-1 text-[10px] font-bold">R$</span>
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                className="w-24 text-right border border-slate-200 rounded p-1 bg-white outline-none focus:border-blue-400 font-bold text-xs"
+                                value={e.value || ''}
+                                placeholder="0.00"
+                                onChange={evt => handleUpdateExpenseValue(e.id, parseFloat(evt.target.value) || 0)}
+                              />
+                            </div>
+                          </td>
+                          <td className="p-3 text-center">
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveExpense(e.id)}
+                              className="p-1 hover:text-red-600 text-slate-400 transition cursor-pointer"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                      {expenses.length === 0 && (
+                        <tr>
+                          <td colSpan={3} className="p-6 text-center text-slate-400 uppercase tracking-wider text-[10px]">Nenhuma despesa de viagem inserida.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Suprimentos Section */}
+              <div className="space-y-4">
+                <div className="border-b border-slate-100 pb-2 flex items-center justify-between">
+                  <div>
+                    <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider">2.1 Suprimentos de Viagem / Caixa</h3>
+                    <p className="text-[10px] text-slate-400 font-semibold uppercase mt-0.5">Informe trocos iniciais ou aportes de dinheiro em caixa recebidos pelo motorista.</p>
+                  </div>
+                </div>
+
+                {/* Inline add suprimento form */}
+                <form onSubmit={handleAddSuprimento} className="grid grid-cols-1 md:grid-cols-3 gap-2 items-end bg-slate-50 p-3 rounded">
+                  <div className="md:col-span-2">
+                    <label className="block text-[9px] font-black uppercase text-slate-500 mb-1">Motivo do Suprimento</label>
+                    <input
+                      type="text"
+                      placeholder="Ex: Troco inicial para viagem"
+                      required
+                      value={newSuprimentoItem}
+                      onChange={e => setNewSuprimentoItem(e.target.value)}
+                      className="w-full bg-white border border-slate-200 rounded text-xs p-2 outline-none font-semibold focus:border-blue-400"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[9px] font-black uppercase text-slate-500 mb-1">Valor</label>
+                    <div className="relative">
+                      <span className="absolute left-2.5 top-2.5 text-[10px] text-slate-400 font-bold">R$</span>
+                      <input
+                        type="number"
+                        min="0.01"
+                        step="0.01"
+                        required
+                        value={newSuprimentoValue || ''}
+                        onChange={e => setNewSuprimentoValue(parseFloat(e.target.value) || 0)}
+                        className="w-full bg-white border border-slate-200 pl-7 pr-2 py-2 rounded text-xs outline-none font-bold focus:border-blue-400"
+                      />
+                    </div>
+                  </div>
+                  <div className="md:col-span-3 flex justify-end">
+                    <button
+                      type="submit"
+                      className="px-4 py-1.5 bg-slate-800 text-white rounded text-[11px] font-bold uppercase tracking-wider flex items-center space-x-1.5 hover:bg-slate-900 transition cursor-pointer"
+                    >
+                      <Plus size={14} />
+                      <span>Inserir Suprimento</span>
+                    </button>
+                  </div>
+                </form>
+
+                {/* Suprimentos Table */}
+                <div className="border border-slate-100 rounded overflow-hidden">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="bg-slate-100 text-[10px] text-slate-500 font-bold uppercase">
+                        <th className="p-3">Descrição / Motivo</th>
+                        <th className="p-3 text-right w-36">Valor</th>
+                        <th className="p-3 text-center w-16">Ação</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 font-semibold text-slate-700">
+                      {suprimentos.map(s => (
+                        <tr key={s.id} className="hover:bg-slate-50/50">
+                          <td className="p-3 text-slate-900 font-bold">{s.item}</td>
+                          <td className="p-3 text-right">
+                            <div className="flex items-center justify-end">
+                              <span className="text-slate-400 mr-1 text-[10px] font-bold">R$</span>
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                className="w-24 text-right border border-slate-200 rounded p-1 bg-white outline-none focus:border-blue-400 font-bold text-xs"
+                                value={s.value || ''}
+                                placeholder="0.00"
+                                onChange={evt => handleUpdateSuprimentoValue(s.id, parseFloat(evt.target.value) || 0)}
+                              />
+                            </div>
+                          </td>
+                          <td className="p-3 text-center">
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveSuprimento(s.id)}
+                              className="p-1 hover:text-red-600 text-slate-400 transition cursor-pointer"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                      {suprimentos.length === 0 && (
+                        <tr>
+                          <td colSpan={3} className="p-6 text-center text-slate-400 uppercase tracking-wider text-[10px]">Nenhum suprimento de viagem inserido.</td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Financial Returns delivered to Conference */}
+              <div className="space-y-4">
+                <div className="border-b border-slate-100 pb-2">
+                  <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider">3. Valores Entregues ao Conferente</h3>
+                  <p className="text-[10px] text-slate-400 font-semibold uppercase mt-0.5">Preencha os valores físicos entregues de acordo com o fechamento.</p>
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">Dinheiro (R$)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={payments.dinheiro || ''}
+                      onChange={e => setPayments({ ...payments, dinheiro: parseFloat(e.target.value) || 0 })}
+                      className="w-full bg-white border border-slate-200 rounded text-xs p-2.5 outline-none font-bold text-slate-800"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">PIX (R$)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={payments.pix || ''}
+                      onChange={e => setPayments({ ...payments, pix: parseFloat(e.target.value) || 0 })}
+                      className="w-full bg-white border border-slate-200 rounded text-xs p-2.5 outline-none font-bold text-slate-800 focus:border-blue-400"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">Boleto (R$)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={payments.boleto || ''}
+                      onChange={e => setPayments({ ...payments, boleto: parseFloat(e.target.value) || 0 })}
+                      className="w-full bg-white border border-slate-200 rounded text-xs p-2.5 outline-none font-bold text-slate-800"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">Cheque (R$)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={payments.cheque || ''}
+                      onChange={e => setPayments({ ...payments, cheque: parseFloat(e.target.value) || 0 })}
+                      className="w-full bg-white border border-slate-200 rounded text-xs p-2.5 outline-none font-bold text-slate-800"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">Outros (R$)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={payments.outros || ''}
+                      onChange={e => setPayments({ ...payments, outros: parseFloat(e.target.value) || 0 })}
+                      className="w-full bg-white border border-slate-200 rounded text-xs p-2.5 outline-none font-bold text-slate-800"
+                    />
+                  </div>
+                </div>
+
+                {/* Real-time remaining payment balance helper */}
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2">
+                  <div className="flex justify-between items-center text-xs font-bold uppercase tracking-wider">
+                    <span className="text-slate-500">Total Esperado (Item 2):</span>
+                    <span className="text-slate-900 font-mono text-sm">R$ {totalToReceive.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between items-center text-xs font-bold uppercase tracking-wider">
+                    <span className="text-slate-500">Total Informado no Caixa (Dinheiro + PIX + etc):</span>
+                    <span className="text-slate-900 font-mono text-sm">R$ {totalDelivered.toFixed(2)}</span>
+                  </div>
+                  
+                  {(() => {
+                    const diff = totalToReceive - totalDelivered;
+                    if (diff > 0.01) {
+                      return (
+                        <div className="text-[11px] font-bold uppercase text-amber-700 bg-amber-50 px-3 py-2 rounded-lg border border-amber-200/60 flex items-center gap-1.5 animate-pulse">
+                          <AlertCircle size={15} />
+                          <span>Falta preencher <strong className="font-mono text-xs">R$ {diff.toFixed(2)}</strong> para fechar o caixa corretamente.</span>
+                        </div>
+                      );
+                    } else if (Math.abs(diff) < 0.01) {
+                      return (
+                        <div className="text-[11px] font-bold uppercase text-emerald-700 bg-emerald-50 px-3 py-2 rounded-lg border border-emerald-200/60 flex items-center gap-1.5">
+                          <Check size={15} className="bg-emerald-100 rounded-full p-0.5" />
+                          <span>Valor correto! O caixa está perfeitamente fechado. ✅</span>
+                        </div>
+                      );
+                    } else {
+                      return (
+                        <div className="text-[11px] font-bold uppercase text-blue-700 bg-blue-50 px-3 py-2 rounded-lg border border-blue-200/60 flex items-center gap-1.5">
+                          <Info size={15} />
+                          <span>Os valores preenchidos superaram o total esperado em <strong className="font-mono text-xs">R$ {Math.abs(diff).toFixed(2)}</strong>.</span>
+                        </div>
+                      );
+                    }
+                  })()}
+                </div>
+
+                {payments.pix > 0 && (
+                  <div className="bg-blue-50/50 border border-blue-100 p-4 rounded-xl space-y-3 mt-3">
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                      <div>
+                        <h4 className="text-xs font-bold text-blue-900 uppercase">Conciliar PIX do Banco (Opcional)</h4>
+                        <p className="text-[10px] text-slate-500 uppercase font-semibold mt-0.5">Selecione o recebimento no extrato bancário importado para vincular a esta carga.</p>
+                      </div>
+                      <span className="text-[10px] font-bold uppercase tracking-wider bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full self-start sm:self-center">
+                        PIX Esperado: R$ {payments.pix.toFixed(2)}
+                      </span>
+                    </div>
+
+                    {bankTransactions.filter(tx => !tx.isReconciled).length === 0 ? (
+                      <div className="text-[10px] text-amber-700 bg-amber-50 p-3 rounded border border-amber-100 font-bold uppercase">
+                        ⚠️ Nenhum PIX disponível no extrato do sistema. Você pode salvar o acerto agora e conciliar depois quando importar o arquivo de extrato do banco.
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {(() => {
+                          const selectedSum = bankTransactions.filter(t => selectedPixTxIds.includes(t.id)).reduce((s, t) => s + t.amount, 0);
+                          const diff = payments.pix - selectedSum;
+                          return (
+                            <div className="bg-white border border-slate-200/80 rounded-xl p-3 flex justify-between items-center text-[10px] font-bold uppercase tracking-wider shadow-sm">
+                              <div className="text-slate-500">
+                                Selecionado: <span className="text-slate-800 font-black font-mono">R$ {selectedSum.toFixed(2)}</span>
+                              </div>
+                              {diff > 0.01 ? (
+                                <div className="text-amber-700 bg-amber-50 px-2.5 py-1 rounded-md border border-amber-200/60 font-black">
+                                  Falta para o total: <span className="font-black font-mono text-xs ml-1">R$ {diff.toFixed(2)}</span>
+                                </div>
+                              ) : Math.abs(diff) < 0.01 ? (
+                                <div className="text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-md border border-emerald-200/60 font-black flex items-center gap-1">
+                                  Valor exato atingido! ✅
+                                </div>
+                              ) : (
+                                <div className="text-blue-700 bg-blue-50 px-2.5 py-1 rounded-md border border-blue-200/60 font-black">
+                                  Superou por: <span className="font-black font-mono text-xs ml-1">R$ {Math.abs(diff).toFixed(2)}</span>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
+
+                        <label className="block text-[9px] font-black text-slate-600 uppercase">Transações Disponíveis no Extrato (Não Conciliadas)</label>
+                        
+                        {/* Search input in active settlement form */}
+                        <div className="relative">
+                          <Search size={14} className="absolute left-2.5 top-2.5 text-slate-400" />
+                          <input
+                            type="text"
+                            placeholder="Buscar transação por valor, data ou nome..."
+                            value={searchPixInActiveSettlementQuery}
+                            onChange={e => setSearchPixInActiveSettlementQuery(e.target.value)}
+                            className="w-full bg-slate-50 border border-slate-200 rounded pl-8 pr-3 py-1.5 text-xs outline-none focus:bg-white focus:border-blue-400 font-medium"
+                          />
+                        </div>
+
+                        <div className="max-h-32 overflow-y-auto border border-slate-200 rounded p-2 bg-white">
+                          <label className="flex items-center space-x-2 text-xs font-bold text-slate-700 p-1 hover:bg-slate-50 cursor-pointer">
+                            <input 
+                              type="checkbox" 
+                              checked={selectedPixTxIds.length === 0}
+                              onChange={() => setSelectedPixTxIds([])}
+                              className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                            />
+                            <span>-- Não Conciliar Agora (Deixar para conciliar depois) --</span>
+                          </label>
+                          {bankTransactions
+                            .filter(tx => !tx.isReconciled)
+                            .filter(tx => {
+                              const query = searchPixInActiveSettlementQuery.toLowerCase().trim();
+                              if (!query) return true;
+
+                              const matchesDesc = tx.description.toLowerCase().includes(query);
+                              const matchesAmount = tx.amount.toString().includes(query) || 
+                                                    tx.amount.toFixed(2).includes(query) ||
+                                                    tx.amount.toFixed(2).replace('.', ',').includes(query);
+                              const matchesRef = (tx.documentRef || '').toLowerCase().includes(query);
+                              const matchesDate = tx.date.includes(query) || (() => {
+                                const [y, m, d] = tx.date.split('-');
+                                if (y && m && d) {
+                                  const brDate = `${d}/${m}/${y}`;
+                                  const brDateShort = `${d}/${m}`;
+                                  return brDate.includes(query) || brDateShort.includes(query);
+                                }
+                                return false;
+                              })();
+
+                              return matchesDesc || matchesAmount || matchesRef || matchesDate;
+                            })
+                            .map(tx => {
+                              const isChecked = selectedPixTxIds.includes(tx.id);
+                              return (
+                                <label key={tx.id} className="flex items-center space-x-2 text-xs font-bold text-slate-700 p-1 hover:bg-slate-50 cursor-pointer">
+                                  <input 
+                                    type="checkbox" 
+                                    checked={isChecked}
+                                    onChange={(e) => {
+                                      if (e.target.checked) {
+                                        setSelectedPixTxIds(prev => [...prev, tx.id]);
+                                      } else {
+                                        setSelectedPixTxIds(prev => prev.filter(id => id !== tx.id));
+                                      }
+                                    }}
+                                    className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                                  />
+                                  <span>R$ {tx.amount.toFixed(2)} - {tx.description} ({formatDateStringBR(tx.date)})</span>
+                                </label>
+                              );
+                            })}
+                          {bankTransactions
+                            .filter(tx => !tx.isReconciled)
+                            .filter(tx => {
+                              const query = searchPixInActiveSettlementQuery.toLowerCase().trim();
+                              if (!query) return true;
+
+                              const matchesDesc = tx.description.toLowerCase().includes(query);
+                              const matchesAmount = tx.amount.toString().includes(query) || 
+                                                    tx.amount.toFixed(2).includes(query) ||
+                                                    tx.amount.toFixed(2).replace('.', ',').includes(query);
+                              const matchesRef = (tx.documentRef || '').toLowerCase().includes(query);
+                              const matchesDate = tx.date.includes(query) || (() => {
+                                const [y, m, d] = tx.date.split('-');
+                                if (y && m && d) {
+                                  const brDate = `${d}/${m}/${y}`;
+                                  const brDateShort = `${d}/${m}`;
+                                  return brDate.includes(query) || brDateShort.includes(query);
+                                }
+                                return false;
+                              })();
+
+                              return matchesDesc || matchesAmount || matchesRef || matchesDate;
+                            }).length === 0 && (
+                              <div className="p-4 text-center text-slate-400 uppercase tracking-wider text-[10px] font-bold">Nenhuma transação corresponde à busca.</div>
+                            )}
+                        </div>
+                        {selectedPixTxIds.length > 0 && (
+                          <div className="text-[10px] text-emerald-700 bg-emerald-50 p-2 rounded border border-emerald-100 font-bold uppercase">
+                            ✅ PIX(s) selecionado(s) será(ão) conciliado(s) automaticamente! (Total: R$ {bankTransactions.filter(t => selectedPixTxIds.includes(t.id)).reduce((s, t) => s + t.amount, 0).toFixed(2)})
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Damages / Loss (Avarias e Perdas) */}
+              <div className="space-y-4">
+                <div className="border-b border-slate-100 pb-2">
+                  <h3 className="text-xs font-bold text-slate-800 uppercase tracking-wider">4. Avarias ou Perdas no Percurso</h3>
+                  <p className="text-[10px] text-slate-400 font-semibold uppercase mt-0.5">
+                    Este motorista possui limite de tolerância de{' '}
+                    <strong className="text-indigo-700">{currentDamageToleranceQty} un</strong> de avarias. 
+                    Será descontado da comissão o excedente cobrado ({avariaQty} un).
+                  </p>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-rose-50/50 p-4 rounded-xl border border-rose-100">
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-600 uppercase mb-1">Avarias a Cobrar (unidades)</label>
+                    <input
+                      type="number"
+                      min="0"
+                      value={avariaQty || '0'}
+                      onChange={e => setAvariaQty(parseInt(e.target.value) || 0)}
+                      className="w-full bg-white border border-slate-200 rounded text-xs p-2.5 outline-none font-bold focus:border-rose-400 focus:ring-1 focus:ring-rose-400"
+                    />
+                    {resolvedProductionControl?.avariasDescarregamento && (
+                      <span className="block text-[10px] text-rose-700 font-semibold mt-1">
+                        Sincronizado do descarregamento (Dutíveis): {totalAvariasDescarrego} un
+                      </span>
+                    )}
+
+                    <div className="mt-2.5 bg-rose-100/50 border border-rose-200 p-2.5 rounded-lg text-rose-950 font-bold text-[11px] space-y-1">
+                      <div className="flex justify-between">
+                        <span>Total de Avarias:</span>
+                        <span>{totalAvariasDescarrego} un</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span>Tolerância do Motorista:</span>
+                        <span>- {currentDamageToleranceQty} un</span>
+                      </div>
+                      <div className="flex justify-between border-t border-rose-200/80 pt-1 text-xs font-black text-rose-900">
+                        <span>Avarias a Cobrar (Após Tolerância):</span>
+                        <span>{avariasACobrarCalculado} un</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-black text-slate-600 uppercase mb-1">Valor do Prejuízo por Unidade (R$)</label>
+                    <div className="relative">
+                      <span className="absolute left-2.5 top-2.5 text-[10px] text-slate-400 font-bold">R$</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={avariaUnitValue || ''}
+                        onChange={e => setAvariaUnitValue(parseFloat(e.target.value) || 0)}
+                        className="w-full bg-white border border-slate-200 pl-7 pr-2 py-2.5 rounded text-xs outline-none font-bold focus:border-rose-400 focus:ring-1 focus:ring-rose-400"
+                        placeholder="0,00"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+
+
+              {/* Observation */}
+              <div>
+                <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">Observações Gerais</label>
+                <textarea
+                  value={observation}
+                  onChange={e => setObservation(e.target.value)}
+                  placeholder="Observações de caixa ou ocorrências de viagem..."
+                  className="w-full bg-white border border-slate-200 rounded text-xs p-2.5 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 min-h-[80px]"
+                />
+              </div>
+
+            </div>
+          </div>
+
+          {/* Sidebar calculations card */}
+          <div className="space-y-6">
+            {/* Driver Mobile Entries Card */}
+            {resolvedProductionControl && (
+              <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 space-y-3">
+                <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                  <h4 className="text-[11px] font-black text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
+                    <Smartphone size={14} className="text-blue-600 animate-pulse" />
+                    Lançamentos do Motorista (App)
+                  </h4>
+                  <span className="text-[9px] bg-blue-100 text-blue-800 font-bold px-1.5 py-0.5 rounded-full uppercase tracking-wider">Roteiro Mobile</span>
+                </div>
+                
+                {/* Sales list from mobile */}
+                <div className="space-y-1.5">
+                  <span className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider">Vendas Realizadas:</span>
+                  {(groupedMobileSales && groupedMobileSales.length > 0) ? (
+                    <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                      {groupedMobileSales.map((g, idx) => {
+                        const activePayments: string[] = [];
+                        if (g.payments.dinheiro > 0) activePayments.push(`Dinheiro: R$ ${g.payments.dinheiro.toFixed(2)}`);
+                        if (g.payments.pix > 0) activePayments.push(`PIX: R$ ${g.payments.pix.toFixed(2)}`);
+                        if (g.payments.boleto > 0) activePayments.push(`Boleto: R$ ${g.payments.boleto.toFixed(2)}`);
+                        if (g.payments.cheque > 0) activePayments.push(`Cheque: R$ ${g.payments.cheque.toFixed(2)}`);
+                        if (g.payments.outros > 0) activePayments.push(`A Prazo: R$ ${g.payments.outros.toFixed(2)}`);
+
+                        return (
+                          <div key={idx} className="bg-white p-2.5 rounded border border-slate-150 text-[11px] flex flex-col gap-1.5 shadow-2xs">
+                            <div className="flex justify-between items-start gap-2">
+                              <span className="font-extrabold text-slate-800 text-xs truncate max-w-[150px]" title={g.clientName}>
+                                {g.clientName}
+                              </span>
+                              <span className="font-black text-slate-900 font-mono text-xs shrink-0">
+                                R$ {g.totalValue.toFixed(2)}
+                              </span>
+                            </div>
+                            
+                            {/* Products list */}
+                            <div className="space-y-0.5 text-[10px] text-slate-600 border-l-2 border-slate-200 pl-1.5 py-0.5">
+                              {g.products.map((p, pIdx) => (
+                                <div key={pIdx} className="flex justify-between">
+                                  <span>{p.item}</span>
+                                  <span className="font-bold font-mono">{p.qty} un</span>
+                                </div>
+                              ))}
+                            </div>
+
+                            {/* Payment Methods */}
+                            {activePayments.length > 0 ? (
+                              <div className="flex flex-wrap items-center gap-1 mt-1 pt-1 border-t border-slate-100 text-[9px] font-bold text-slate-500">
+                                {activePayments.map((payStr, payIdx) => (
+                                  <span key={payIdx} className="bg-slate-100 px-1.5 py-0.5 rounded-sm">
+                                    {payStr}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : (
+                              <div className="text-[9px] text-emerald-600 font-bold mt-1 pt-1 border-t border-slate-100">
+                                Cortesia / Sem Custo
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <span className="text-[10px] text-slate-400 italic block pl-1">Nenhuma venda registrada no App</span>
+                  )}
+                </div>
+
+                {/* Logistics Operations */}
+                <div className="grid grid-cols-3 gap-1.5 border-t border-b border-slate-200/60 py-2.5 text-center bg-white/40 rounded-lg px-1">
+                  <div className="bg-white p-1 rounded border border-slate-150 flex flex-col justify-center shadow-3xs">
+                    <span className="block text-[7.5px] font-extrabold text-slate-400 uppercase leading-none mb-1">Bonificação</span>
+                    <strong className="text-slate-700 text-[11px] font-mono leading-none">{resolvedProductionControl.mobileBonifications || 0} un</strong>
+                  </div>
+                  <div className="bg-white p-1 rounded border border-slate-150 flex flex-col justify-center shadow-3xs">
+                    <span className="block text-[7.5px] font-extrabold text-slate-400 uppercase leading-none mb-1 font-mono">Com. Deixado</span>
+                    <strong className="text-indigo-600 text-[11px] font-mono leading-none">{resolvedProductionControl.mobileComodato || 0} un</strong>
+                  </div>
+                  <div className="bg-white p-1 rounded border border-slate-150 flex flex-col justify-center shadow-3xs">
+                    <span className="block text-[7.5px] font-extrabold text-slate-400 uppercase leading-none mb-1 font-mono">Com. Retirado</span>
+                    <strong className="text-emerald-600 text-[11px] font-mono leading-none">{resolvedProductionControl.mobileComodatoReturn || 0} un</strong>
+                  </div>
+                </div>
+
+                {/* Expenses from mobile */}
+                <div className="space-y-1.5 pt-1">
+                  <span className="block text-[9px] font-bold text-slate-400 uppercase tracking-wider">Despesas de Viagem:</span>
+                  {(resolvedProductionControl.mobileExpenses && resolvedProductionControl.mobileExpenses.length > 0) ? (
+                    <div className="space-y-1">
+                      {resolvedProductionControl.mobileExpenses.map((e, idx) => (
+                        <div key={idx} className="bg-white p-1.5 rounded border border-slate-150 text-[11px] flex justify-between items-center shadow-3xs">
+                          <span className="font-bold text-slate-700">{e.item}</span>
+                          <span className="font-semibold text-slate-900 font-mono">R$ {e.value.toFixed(2)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="text-[10px] text-slate-400 italic block pl-1">Nenhuma despesa registrada no App</span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden sticky top-6">
+              
+              <div className="p-4 bg-slate-900 text-white flex items-center justify-between">
+                <span className="text-xs font-bold uppercase tracking-wider">Painel Financeiro</span>
+                <Coins size={16} className="text-blue-400" />
+              </div>
+
+              <div className="p-5 space-y-4">
+                {/* Total Sales */}
+                <div className="flex justify-between text-xs font-bold border-b border-slate-100 pb-3">
+                  <span className="text-slate-500">TOTAL DE VENDAS:</span>
+                  <span className="text-slate-900 font-extrabold text-sm">R$ {totalSalesAmount.toFixed(2)}</span>
+                </div>
+
+                {/* Total Expenses */}
+                <div className="flex justify-between text-xs font-bold border-b border-slate-100 pb-3">
+                  <span className="text-slate-500">DESPESAS REEMBOLSADAS:</span>
+                  <span className="text-slate-900 font-bold">- R$ {totalExpensesAmount.toFixed(2)}</span>
+                </div>
+
+                {/* Total Suprimentos */}
+                {totalSuprimentosAmount > 0 && (
+                  <div className="flex justify-between text-xs font-bold border-b border-slate-100 pb-3">
+                    <span className="text-slate-500">SUPRIMENTOS DE CAIXA:</span>
+                    <span className="text-slate-900 font-bold">+ R$ {totalSuprimentosAmount.toFixed(2)}</span>
+                  </div>
+                )}
+
+                {/* Total Cash Advances */}
+                {totalCashAdvances > 0 && (
+                  <div className="flex justify-between text-xs font-bold border-b border-slate-100 pb-3">
+                    <span className="text-slate-500">ADIANTAMENTO DE CAIXA:</span>
+                    <span className="text-emerald-600 font-bold">+ R$ {totalCashAdvances.toFixed(2)}</span>
+                  </div>
+                )}
+
+                {/* Expected to Receive */}
+                <div className="flex justify-between text-xs font-bold border-b border-slate-100 pb-3">
+                  <span className="text-slate-500">VALOR ESPERADO LÍQUIDO:</span>
+                  <span className="text-slate-900 font-extrabold text-sm text-blue-600">R$ {totalToReceive.toFixed(2)}</span>
+                </div>
+
+                {/* Delivered Cash by Driver */}
+                <div className="flex justify-between text-xs font-bold border-b border-slate-100 pb-3">
+                  <span className="text-slate-500">VALORES FÍSICOS ENTREGUES:</span>
+                  <span className="text-slate-900 font-extrabold text-sm text-indigo-600">R$ {totalDelivered.toFixed(2)}</span>
+                </div>
+
+                {/* Caixas discrepancies logic */}
+                <div className="flex justify-between text-xs font-bold border-b border-slate-100 pb-3">
+                  <span className="text-slate-500">DIFERENÇA DE CAIXA:</span>
+                  {difference < 0 ? (
+                    <span className="text-rose-600 font-bold">R$ {difference.toFixed(2)} (FALTA)</span>
+                  ) : difference > 0 ? (
+                    <span className="text-emerald-600 font-bold">R$ +{difference.toFixed(2)} (SOBRA)</span>
+                  ) : (
+                    <span className="text-emerald-600 font-bold">R$ 0.00 (CORRETO)</span>
+                  )}
+                </div>
+
+                {/* Warnings or informational boxes */}
+                {difference < 0 && (
+                  <div className="p-2.5 bg-rose-50 border-l-4 border-rose-500 rounded text-[10px] text-rose-800 font-bold">
+                    ATENÇÃO: A falta de R$ {Math.abs(difference).toFixed(2)} será descontada da comissão do motorista.
+                  </div>
+                )}
+                {difference > 0 && (
+                  <div className="p-2.5 bg-emerald-50 border-l-4 border-emerald-500 rounded text-[10px] text-emerald-800 font-bold">
+                    O excedente de R$ {difference.toFixed(2)} pertence à empresa e não será adicionado à comissão.
+                  </div>
+                )}
+
+                {/* COMMISSION CALCULATOR */}
+                <div className="bg-slate-50 p-4 rounded-lg space-y-3.5 border border-slate-200/60">
+                  <h4 className="text-[10px] font-black text-slate-600 uppercase tracking-widest border-b border-slate-200 pb-1.5">Memória de Cálculo de Comissão</h4>
+                  
+                  <div className="flex justify-between text-[11px] font-bold text-slate-600">
+                    <span>Comissão Bruta ({commissionPercent}%):</span>
+                    <span>R$ {basicCommission.toFixed(2)}</span>
+                  </div>
+
+                  <div className="flex justify-between text-[11px] font-bold text-rose-600">
+                    <span>Desconto de Avarias:</span>
+                    <span>- R$ {avariaDeduction.toFixed(2)}</span>
+                  </div>
+
+                  <div className="flex justify-between text-[11px] font-bold text-rose-600">
+                    <span>Desconto Falta Caixa:</span>
+                    <span>- R$ {shortageDeduction.toFixed(2)}</span>
+                  </div>
+
+                  <div className="border-t border-slate-200/80 pt-2 flex justify-between text-xs font-black text-slate-800">
+                    <span>COMISSÃO LÍQUIDA A PAGAR:</span>
+                    <span className="text-emerald-600 text-sm">R$ {finalCommission.toFixed(2)}</span>
+                  </div>
+                </div>
+
+                <div className="pt-3 space-y-2">
+                  <button
+                    onClick={() => handleSaveSettlement(true)}
+                    className="w-full border border-amber-300 text-amber-800 bg-amber-50 hover:bg-amber-100 p-2.5 font-bold text-xs uppercase tracking-wider rounded-lg transition flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <FileText size={14} className="text-amber-600" />
+                    <span>Salvar Parcial (Rascunho)</span>
+                  </button>
+
+                  <button
+                    onClick={() => handleSaveSettlement(false)}
+                    className="w-full bg-blue-600 hover:bg-blue-700 text-white p-3 font-bold text-xs uppercase tracking-wider rounded-lg shadow-md hover:shadow-lg transition flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Check size={16} />
+                    <span>Concluir e Salvar Acerto</span>
+                  </button>
+                </div>
+
+              </div>
+
+            </div>
+          </div>
+
+        </div>
+      )}
+
+      {/* COMPLETED SETTLEMENTS VIEW (HISTORY) */}
+      {activeSubTab === 'history' && !selectedMovement && (
+        <div className="space-y-4">
+          
+          {/* Caixa/Cashier summary bento panel */}
+          <div className="bg-white rounded-xl border border-slate-200/90 shadow-sm p-4 overflow-hidden space-y-3">
+            <div className="flex items-center justify-between border-b border-slate-150 pb-2">
+              <h3 className="text-xs font-black text-slate-800 uppercase tracking-wider flex items-center gap-1.5">
+                <Coins size={16} className="text-amber-500" /> Resultado de Fluxo de Caixa (Prestações Homologadas)
+              </h3>
+              <span className="text-[10px] bg-slate-100 text-slate-600 font-bold px-2 py-0.5 rounded-full uppercase">
+                {cashierSummary.completedCount} acerto(s) finalizado(s)
+              </span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {/* Dinheiro (Sales - Expenses) */}
+              <div className="bg-slate-50/70 border border-slate-200 rounded-xl p-3.5 space-y-2">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block border-b border-slate-200/50 pb-1 flex items-center gap-1">
+                  💵 Dinheiro (Espécie)
+                </span>
+                <div className="space-y-1.5 text-xs font-medium text-slate-600">
+                  <div className="flex justify-between">
+                    <span>Vendas em Dinheiro (Bruto):</span>
+                    <span className="font-mono font-bold text-slate-800">R$ {cashierSummary.totalSalesDinheiro.toFixed(2)}</span>
+                  </div>
+                  {cashierSummary.totalShortageDeductions > 0 && (
+                    <div className="flex justify-between text-rose-700">
+                      <span>Faltas de Carga (Dinheiro Não Recebido):</span>
+                      <span className="font-mono font-bold">- R$ {cashierSummary.totalShortageDeductions.toFixed(2)}</span>
+                    </div>
+                  )}
+                  <div className="flex justify-between text-rose-700">
+                    <span>Despesas de Viagem:</span>
+                    <span className="font-mono font-bold">- R$ {cashierSummary.totalExpenses.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between text-rose-700/90">
+                    <span>Comissão Efetivamente Paga (Dinheiro):</span>
+                    <span className="font-mono font-bold">- R$ {cashierSummary.totalFinalCommissions.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between text-[10px] text-slate-500 pl-3 border-b border-dashed border-slate-200/60 pb-1">
+                    <span>↳ Comissão de Vendas de Água (Valor Real):</span>
+                    <span className="font-mono">R$ {cashierSummary.totalBasicCommissions.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between text-emerald-700">
+                    <span>Suprimentos de Caixa:</span>
+                    <span className="font-mono font-bold">+ R$ {cashierSummary.totalSuprimentos.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between border-t border-dashed border-slate-200 pt-1.5 font-bold text-slate-900 bg-emerald-50/60 p-1.5 rounded-lg border border-emerald-200/40">
+                    <span className="text-emerald-800 font-black">SALDO LÍQUIDO (C/ COMIS., SUPR. E DESP.):</span>
+                    <span className="font-mono font-black text-emerald-900 text-sm">R$ {cashierSummary.netDinheiro.toFixed(2)}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Outras Formas de Pagamento */}
+              <div className="bg-slate-50/70 border border-slate-200 rounded-xl p-3.5 space-y-2">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block border-b border-slate-200/50 pb-1 flex items-center gap-1">
+                  🏦 Outros Meios de Recebimento
+                </span>
+                <div className="space-y-1 text-xs font-medium text-slate-600">
+                  <div className="flex justify-between">
+                    <span>Vendas via PIX:</span>
+                    <span className="font-mono font-bold text-blue-700">R$ {cashierSummary.totalSalesPix.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Vendas via Boleto:</span>
+                    <span className="font-mono font-bold text-purple-700">R$ {cashierSummary.totalSalesBoleto.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Vendas via Cheque:</span>
+                    <span className="font-mono font-bold text-slate-700">R$ {cashierSummary.totalSalesCheque.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Outras Formas:</span>
+                    <span className="font-mono font-bold text-slate-600">R$ {cashierSummary.totalSalesOutros.toFixed(2)}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Caixa Geral */}
+              <div className="bg-gradient-to-br from-indigo-900 to-slate-900 text-white rounded-xl p-3.5 flex flex-col justify-between shadow-xs border border-indigo-950/80">
+                <div className="space-y-1">
+                  <span className="text-[9px] font-black uppercase tracking-wider text-indigo-300 block">
+                    💰 TOTAL ACUMULADO EM CAIXA
+                  </span>
+                  <span className="text-2xl font-black font-mono tracking-tight text-white block mt-1">
+                    R$ {cashierSummary.totalCaixaGeral.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
+                </div>
+                <span className="text-[9px] text-indigo-200/70 font-medium block mt-2 border-t border-indigo-800/60 pt-1.5">
+                  Fórmula: Saldo Líquido Dinheiro + PIX + Boleto + Cheque + Outros
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {/* Filters card */}
+          <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm space-y-3.5">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="relative flex-1 max-w-md">
+                <Search size={16} className="absolute left-3 top-3.5 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Buscar por motorista, placa ou ID..."
+                  value={searchSettlementQuery}
+                  onChange={e => setSearchSettlementQuery(e.target.value)}
+                  className="w-full pl-9 pr-4 py-2.5 bg-slate-50 text-xs border border-slate-200 rounded-lg outline-none focus:bg-white focus:border-blue-400 focus:ring-1 focus:ring-blue-400 font-medium"
+                />
+              </div>
+
+              <div className="flex items-center space-x-3">
+                <span className="text-[11px] font-bold uppercase text-slate-500 flex items-center gap-1">
+                  <Filter size={14} /> Filtrar Conciliação:
+                </span>
+                <div className="flex bg-slate-100 p-1 rounded-lg">
+                  <button
+                    onClick={() => setFilterReconciliation('all')}
+                    className={`px-3 py-1.5 rounded-md text-[11px] font-bold uppercase tracking-wider transition-all ${
+                      filterReconciliation === 'all' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'
+                    }`}
+                  >
+                    Todos
+                  </button>
+                  <button
+                    onClick={() => setFilterReconciliation('reconciled')}
+                    className={`px-3 py-1.5 rounded-md text-[11px] font-bold uppercase tracking-wider transition-all ${
+                      filterReconciliation === 'reconciled' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'
+                    }`}
+                  >
+                    Conciliado PIX
+                  </button>
+                  <button
+                    onClick={() => setFilterReconciliation('pending')}
+                    className={`px-3 py-1.5 rounded-md text-[11px] font-bold uppercase tracking-wider transition-all ${
+                      filterReconciliation === 'pending' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'
+                    }`}
+                  >
+                    Pendente PIX
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Row 2: Advanced filters */}
+            <div className="pt-3 border-t border-slate-100 flex flex-wrap items-center gap-3">
+              {/* Filter by Start Date */}
+              <div className="flex flex-col gap-1 min-w-[140px]">
+                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Data Inicial</label>
+                <input
+                  type="date"
+                  value={filterSettlementStartDate}
+                  onChange={e => setFilterSettlementStartDate(e.target.value)}
+                  className="bg-slate-50 border border-slate-200 text-slate-700 text-xs rounded-lg p-2 font-medium outline-none focus:bg-white focus:border-blue-400"
+                />
+              </div>
+
+              {/* Filter by End Date */}
+              <div className="flex flex-col gap-1 min-w-[140px]">
+                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Data Final</label>
+                <input
+                  type="date"
+                  value={filterSettlementEndDate}
+                  onChange={e => setFilterSettlementEndDate(e.target.value)}
+                  className="bg-slate-50 border border-slate-200 text-slate-700 text-xs rounded-lg p-2 font-medium outline-none focus:bg-white focus:border-blue-400"
+                />
+              </div>
+
+              {/* Filter by Driver */}
+              <div className="flex flex-col gap-1 min-w-[160px] flex-1 md:flex-initial">
+                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Motorista</label>
+                <select
+                  value={filterSettlementDriver}
+                  onChange={e => setFilterSettlementDriver(e.target.value)}
+                  className="bg-slate-50 border border-slate-200 text-slate-700 text-xs rounded-lg p-2 font-medium outline-none focus:bg-white focus:border-blue-400"
+                >
+                  <option value="">Todos os Motoristas</option>
+                  {uniqueDriversForHistory.map(drv => (
+                    <option key={drv} value={drv}>{drv}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Filter by Vehicle */}
+              <div className="flex flex-col gap-1 min-w-[140px] flex-1 md:flex-initial">
+                <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Veículo / Placa</label>
+                <select
+                  value={filterSettlementVehicle}
+                  onChange={e => setFilterSettlementVehicle(e.target.value)}
+                  className="bg-slate-50 border border-slate-200 text-slate-700 text-xs rounded-lg p-2 font-medium outline-none focus:bg-white focus:border-blue-400 uppercase"
+                >
+                  <option value="">Todos os Veículos</option>
+                  {uniqueVehiclesForHistory.map(v => (
+                    <option key={v} value={v}>{v.toUpperCase()}</option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Clear filters button */}
+              {(filterSettlementStartDate || filterSettlementEndDate || filterSettlementDriver || filterSettlementVehicle || searchSettlementQuery || filterReconciliation !== 'all') && (
+                <div className="flex items-end self-end h-[34px]">
+                  <button
+                    onClick={() => {
+                      setFilterSettlementStartDate('');
+                      setFilterSettlementEndDate('');
+                      setFilterSettlementDriver('');
+                      setFilterSettlementVehicle('');
+                      setSearchSettlementQuery('');
+                      setFilterReconciliation('all');
+                    }}
+                    className="bg-slate-100 hover:bg-slate-200 text-slate-600 px-3 py-2 rounded-lg text-xs font-bold transition flex items-center gap-1 cursor-pointer"
+                  >
+                    <span>Limpar Filtros</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* History table */}
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
+              <h2 className="text-xs font-bold text-slate-800 uppercase tracking-tight">Lista de Acertos Realizados</h2>
+              <span className="text-[10px] font-bold uppercase tracking-wider bg-slate-100 text-slate-700 px-2 py-0.5 rounded">
+                {filteredCompletedSettlements.length} resultados
+              </span>
+            </div>
+
+            {filteredCompletedSettlements.length === 0 ? (
+              <div className="p-12 text-center">
+                <h3 className="text-sm font-bold text-slate-800">Nenhum acerto encontrado</h3>
+                <p className="text-xs text-slate-400 mt-1">Experimente mudar o filtro ou buscar outro termo.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold text-[10px] uppercase">
+                      <th className="p-4">Carga / Placa</th>
+                      <th className="p-4">Motorista</th>
+                      <th className="p-4">Data Acerto</th>
+                      <th className="p-4 text-right">Vendas Líquidas</th>
+                      <th className="p-4 text-right">Diferença Caixa</th>
+                      <th className="p-4 text-right font-bold">Comissão Líquida</th>
+                      <th className="p-4 text-center">Status PIX</th>
+                      <th className="p-4 text-right">Ações</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                    {filteredCompletedSettlements.map(ds => (
+                      <tr key={ds.id} className="hover:bg-slate-50/60">
+                        <td className="p-4">
+                          <span className="font-bold text-slate-900">{ds.plate}</span>
+                          <span className="block text-[9px] text-slate-400 uppercase font-bold mt-0.5">ID: {ds.id}</span>
+                        </td>
+                        <td className="p-4">{ds.driverName}</td>
+                        <td className="p-4 text-slate-500">{new Date(ds.dateArrival).toLocaleString('pt-BR')}</td>
+                        <td className="p-4 text-right font-bold text-slate-900">R$ {ds.totalToReceive.toFixed(2)}</td>
+                        <td className="p-4 text-right">
+                          {ds.difference < 0 ? (
+                            <span className="text-rose-600 font-bold">R$ {ds.difference.toFixed(2)}</span>
+                          ) : ds.difference > 0 ? (
+                            <span className="text-emerald-600 font-bold">R$ +{ds.difference.toFixed(2)}</span>
+                          ) : (
+                            <span className="text-slate-400">R$ 0.00</span>
+                          )}
+                        </td>
+                        <td className="p-4 text-right text-emerald-600 font-black text-sm">
+                          R$ {ds.finalCommission.toFixed(2)}
+                        </td>
+                        <td className="p-4 text-center">
+                          {(ds.payments?.pix || 0) === 0 ? (
+                            <span className="inline-flex px-2 py-0.5 bg-slate-100 text-slate-600 text-[9px] font-black uppercase tracking-wider rounded-full border border-slate-200" title="Não possui pagamentos via PIX. Conciliado automaticamente.">
+                              NÃO UTILIZA PIX
+                            </span>
+                          ) : ds.isReconciled ? (
+                            <span className="inline-flex px-2 py-0.5 bg-emerald-100 text-emerald-800 text-[9px] font-black uppercase tracking-wider rounded-full">
+                              CONCILIADO
+                            </span>
+                          ) : (
+                            <span className="inline-flex px-2 py-0.5 bg-amber-100 text-amber-800 text-[9px] font-black uppercase tracking-wider rounded-full">
+                              AGUARDANDO PIX
+                            </span>
+                          )}
+                        </td>
+                        <td className="p-4 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            {/* Detailed Modal view */}
+                            <button
+                              onClick={() => setViewingSettlement(ds)}
+                              className="p-1 hover:text-blue-600 text-slate-400 cursor-pointer"
+                              title="Visualizar Acerto"
+                            >
+                              <Eye size={16} />
+                            </button>
+                            <button
+                              onClick={() => handlePrint(ds)}
+                              className="p-1 hover:text-slate-950 text-slate-400 cursor-pointer"
+                              title="Imprimir Recibo"
+                            >
+                              <Printer size={16} />
+                            </button>
+                            {!ds.isReconciled && ds.payments.pix > 0 && !(ds.reconciledPixTransactionIds && ds.reconciledPixTransactionIds.length > 0) && !ds.reconciledPixTransactionId && (
+                              <button
+                                onClick={() => handleOpenReconcile(ds)}
+                                className="px-2 py-1 bg-amber-500 hover:bg-amber-600 text-white font-bold text-[9px] uppercase rounded shadow cursor-pointer"
+                                title="Conciliar recebimento com transação de PIX"
+                              >
+                                Conciliar
+                              </button>
+                            )}
+                            {(ds.isReconciled || (ds.reconciledPixTransactionIds && ds.reconciledPixTransactionIds.length > 0) || ds.reconciledPixTransactionId) && (
+                              <div className="px-2 py-1 bg-slate-100 text-slate-400 font-bold text-[9px] uppercase rounded flex items-center gap-1 cursor-not-allowed select-none" title="Conciliação não pode ser desfeita">
+                                <Lock size={10} />
+                                Conciliado
+                              </div>
+                            )}
+                            <button
+                              onClick={() => deleteDriverSettlement(ds.id)}
+                              className="p-1 hover:text-red-600 text-slate-400 cursor-pointer"
+                              title="Excluir Acerto"
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* BANK RECONCILIATION TAB */}
+      {activeSubTab === 'bank_reconciliation' && !selectedMovement && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          
+          {/* Statement Upload Box */}
+          <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm space-y-5 h-fit">
+            <div className="flex items-center space-x-2 border-b border-slate-100 pb-3">
+              <Landmark size={18} className="text-blue-600" />
+              <h2 className="text-sm font-bold text-slate-800 uppercase tracking-tight">Extrato do Banco (Importação)</h2>
+            </div>
+
+            <p className="text-xs text-slate-500 leading-relaxed font-medium">
+              Faça upload do arquivo de extrato do banco (formato CSV, OFX ou TXT) para importar os recebimentos PIX de entrada. O sistema processará o arquivo buscando PIX que possam ser vinculados à carga.
+            </p>
+
+            {/* Simulated file layout instruction */}
+            <div className="bg-slate-50 p-3 rounded text-[10px] text-slate-600 font-semibold space-y-1">
+              <p className="font-bold uppercase text-slate-800">Formato CSV esperado:</p>
+              <code className="block bg-white p-1.5 border border-slate-100 rounded text-slate-500 font-mono">
+                data;descricao;valor;referencia<br />
+                2026-06-24;PIX RECEBIDO CARLOS;1450.00;REF123
+              </code>
+            </div>
+
+            <div className="space-y-3">
+              <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleBankFileUpload}
+                accept=".csv,.ofx,.txt"
+                className="hidden"
+              />
+              
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="w-full bg-slate-900 hover:bg-slate-950 text-white font-bold text-xs uppercase p-3 rounded shadow transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <Upload size={16} />
+                <span>Importar Arquivo Bancário</span>
+              </button>
+
+            </div>
+
+            {importSuccessMessage && (
+              <div className="p-3.5 bg-emerald-50 text-emerald-800 text-xs rounded border border-emerald-100 font-medium">
+                {importSuccessMessage}
+              </div>
+            )}
+          </div>
+
+          {/* Statement Transaction List */}
+          <div className="lg:col-span-2 space-y-4">
+            
+            {/* Filters */}
+            <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-3">
+              <div className="relative flex-1 w-full">
+                <Search size={14} className="absolute left-2.5 top-2.5 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Buscar por descrição, valor ou ref..."
+                  value={searchBankQuery}
+                  onChange={e => setSearchBankQuery(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded pl-8 pr-3 py-1.5 text-xs outline-none focus:bg-white focus:border-blue-400"
+                />
+              </div>
+
+              <div className="flex bg-slate-100 p-1 rounded-lg">
+                <button
+                  onClick={() => setFilterBankReconciliation('all')}
+                  className={`px-3 py-1 text-[10px] font-bold uppercase transition ${
+                    filterBankReconciliation === 'all' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'
+                  }`}
+                >
+                  Todos
+                </button>
+                <button
+                  onClick={() => setFilterBankReconciliation('reconciled')}
+                  className={`px-3 py-1 text-[10px] font-bold uppercase transition ${
+                    filterBankReconciliation === 'reconciled' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'
+                  }`}
+                >
+                  Conciliados
+                </button>
+                <button
+                  onClick={() => setFilterBankReconciliation('pending')}
+                  className={`px-3 py-1 text-[10px] font-bold uppercase transition ${
+                    filterBankReconciliation === 'pending' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'
+                  }`}
+                >
+                  Não Conciliados
+                </button>
+              </div>
+            </div>
+
+            {/* List Table */}
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+              <div className="p-4 border-b border-slate-100 bg-slate-50/50">
+                <h3 className="text-xs font-bold text-slate-800 uppercase tracking-tight">Transações PIX do Extrato Importado</h3>
+              </div>
+
+              {filteredBankTxs.length === 0 ? (
+                <div className="p-12 text-center text-slate-400 uppercase tracking-wider text-[10px]">Nenhuma transação bancária importada correspondente.</div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold text-[10px] uppercase">
+                        <th className="p-4">Data Transação</th>
+                        <th className="p-4">Descrição</th>
+                        <th className="p-4 text-right">Valor Recebido</th>
+                        <th className="p-4">Cód. Documento</th>
+                        <th className="p-4 text-center">Status</th>
+                        <th className="p-4 text-right">Ações</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                      {filteredBankTxs.map(tx => (
+                        <tr key={tx.id} className="hover:bg-slate-50/60">
+                          <td className="p-4">{formatDateStringBR(tx.date)}</td>
+                          <td className="p-4 font-bold text-slate-900">{tx.description}</td>
+                          <td className="p-4 text-right font-black text-emerald-600">R$ {tx.amount.toFixed(2)}</td>
+                          <td className="p-4 text-slate-500 font-mono">{tx.documentRef || '-'}</td>
+                          <td className="p-4 text-center">
+                            {tx.isReconciled ? (
+                              tx.manualReconciliationReason ? (
+                                <span className="px-2 py-0.5 bg-indigo-100 text-indigo-800 text-[9px] font-bold rounded-full" title={`Conciliado Manualmente: ${tx.manualReconciliationReason}`}>
+                                  CONCILIADO MANUAL
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 text-[9px] font-bold rounded-full" title={`Vinculado ao acerto ID: ${tx.reconciledWithSettlementId}`}>
+                                  VINCULADO / CONCILIADO
+                                </span>
+                              )
+                            ) : (
+                              <span className="px-2 py-0.5 bg-slate-100 text-slate-500 text-[9px] font-bold rounded-full">
+                                DISPONÍVEL
+                              </span>
+                            )}
+                          </td>
+                          <td className="p-4 text-right">
+                            <div className="flex justify-end gap-2">
+                              {tx.isReconciled && !tx.manualReconciliationReason && tx.reconciledWithSettlementId && (
+                                <button 
+                                  onClick={() => {
+                                    const st = driverSettlements.find(d => d.id === tx.reconciledWithSettlementId);
+                                    if (st) setViewingSettlement(st);
+                                  }}
+                                  className="text-emerald-600 hover:bg-emerald-50 px-2 py-1 rounded text-[10px] font-bold"
+                                  title="Visualizar Acerto"
+                                >
+                                  Ver Acerto
+                                </button>
+                              )}
+                              {tx.isReconciled && tx.manualReconciliationReason && (
+                                <span className="text-slate-400 text-[10px] font-bold flex items-center gap-1 select-none py-1 px-2 bg-slate-50 border border-slate-100 rounded" title="Conciliação manual não pode ser desfeita">
+                                  <Lock size={10} className="text-slate-400" />
+                                  Conciliação Bloqueada
+                                </span>
+                              )}
+                              {!tx.isReconciled && (
+                                <>
+                                  <button
+                                    onClick={() => setTxToManualReconcile(tx)}
+                                    className="text-indigo-600 hover:bg-indigo-50 px-2 py-1 rounded text-[10px] font-bold"
+                                    title="Conciliar sem acerto"
+                                  >
+                                    Conciliar Manual
+                                  </button>
+                                  <button
+                                    onClick={() => setTxToDelete(tx)}
+                                    className="text-rose-600 hover:bg-rose-50 px-2 py-1 rounded text-[10px] font-bold"
+                                    title="Excluir Transação"
+                                  >
+                                    Excluir
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+          </div>
+
+        </div>
+      )}
+
+      {/* VIEW DETAILS MODAL */}
+      {viewingSettlement && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full border border-slate-200 overflow-hidden my-8">
+            <div className="p-4 bg-slate-900 text-white flex justify-between items-center">
+              <div>
+                <h3 className="text-sm font-bold uppercase tracking-tight">Detalhes do Acerto - {viewingSettlement.driverName}</h3>
+                <p className="text-[10px] text-slate-400 font-semibold uppercase mt-0.5">ID: {viewingSettlement.id}</p>
+              </div>
+              <button
+                onClick={() => setViewingSettlement(null)}
+                className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-6 max-h-[80vh] overflow-y-auto">
+              <div className="grid grid-cols-2 gap-4 text-xs font-semibold">
+                <div>
+                  <span className="text-[10px] text-slate-400 uppercase tracking-wider block">Veículo / Placa:</span>
+                  <span className="text-slate-800 font-bold">{viewingSettlement.plate}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400 uppercase tracking-wider block">Data do Fechamento:</span>
+                  <span className="text-slate-800 font-bold">{new Date(viewingSettlement.dateArrival).toLocaleString('pt-BR')}</span>
+                </div>
+              </div>
+
+              {/* Items Table Grouped by Client */}
+              <div className="space-y-2">
+                <h4 className="text-[10px] font-black text-slate-600 uppercase tracking-wider border-b pb-1">Produtos Vendidos</h4>
+                <div className="border rounded overflow-hidden">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="bg-slate-50 font-bold text-slate-500 text-[10px] uppercase">
+                        <th className="p-2.5">Descrição</th>
+                        <th className="p-2.5 text-center w-24">Quantidade</th>
+                        <th className="p-2.5 text-right w-28">Unitário</th>
+                        <th className="p-2.5 text-right w-28">Subtotal</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y font-medium text-slate-700">
+                      {(() => {
+                        if (!viewingSettlement.sales || viewingSettlement.sales.length === 0) {
+                          return (
+                            <tr>
+                              <td colSpan={4} className="p-4 text-center text-slate-400 text-[10px] uppercase">Nenhuma venda informada</td>
+                            </tr>
+                          );
+                        }
+
+                        // Group sales by clientName
+                        const groups: Record<string, SettlementSale[]> = {};
+                        viewingSettlement.sales.forEach(s => {
+                          const client = (s.clientName || 'Carga Inicial (Vendas do App)').trim();
+                          if (!groups[client]) {
+                            groups[client] = [];
+                          }
+                          groups[client].push(s);
+                        });
+
+                        return Object.entries(groups).map(([clientName, clientSales]) => (
+                          <React.Fragment key={clientName}>
+                            {/* Group Header */}
+                            <tr className="bg-slate-50 font-bold text-slate-600 text-[9px] uppercase border-y border-slate-100">
+                              <td colSpan={4} className="p-1.5 pl-2.5 bg-slate-100/50">
+                                👤 CLIENTE: <span className="text-indigo-700 font-extrabold">{clientName}</span>
+                              </td>
+                            </tr>
+                            {/* Rows */}
+                            {clientSales.map(s => (
+                              <tr key={s.id}>
+                                <td className="p-2.5 pl-4 text-slate-900">
+                                  <div className="flex flex-col">
+                                    <span>{s.item}</span>
+                                    {s.paymentMethodNote && (
+                                      <span className="text-[9px] text-emerald-600 font-bold uppercase mt-0.5">
+                                        💳 {s.paymentMethodNote}
+                                      </span>
+                                    )}
+                                    {s.paymentMethod && !s.paymentMethodNote && (
+                                      <span className="text-[9px] text-indigo-600 font-bold uppercase mt-0.5">
+                                        💳 {s.paymentMethod.toUpperCase()}
+                                      </span>
+                                    )}
+                                  </div>
+                                </td>
+                                <td className="p-2.5 text-center">{s.qty}</td>
+                                <td className="p-2.5 text-right">R$ {s.value.toFixed(2)}</td>
+                                <td className="p-2.5 text-right font-bold text-slate-900">R$ {(s.qty * s.value).toFixed(2)}</td>
+                              </tr>
+                            ))}
+                          </React.Fragment>
+                        ));
+                      })()}
+                      <tr className="bg-slate-50 font-bold">
+                        <td colSpan={3} className="p-2.5 text-right uppercase">Total Vendas:</td>
+                        <td className="p-2.5 text-right">R$ {viewingSettlement.totalSales.toFixed(2)}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Summary of Sales by Payment Method and Products in viewing modal */}
+              {viewingSettlement.sales && viewingSettlement.sales.length > 0 && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 bg-slate-50 p-3 rounded-lg border text-xs">
+                  {/* Products Summary */}
+                  <div className="space-y-1.5">
+                    <h4 className="text-[9px] font-black text-slate-500 uppercase tracking-wider border-b pb-0.5">Venda Total de Produtos</h4>
+                    <div className="space-y-1">
+                      {(() => {
+                        const prodTotals = calculateSalesProductTotals(viewingSettlement.sales);
+                        return Object.entries(prodTotals).map(([name, qty]) => (
+                          <div key={name} className="flex justify-between text-[11px] font-bold text-slate-600 bg-white p-1.5 rounded border">
+                            <span>{name}</span>
+                            <span className="font-mono text-slate-900 font-black">{qty} un</span>
+                          </div>
+                        ));
+                      })()}
+                    </div>
+                  </div>
+
+                  {/* Payment Methods Summary */}
+                  <div className="space-y-1.5">
+                    <h4 className="text-[9px] font-black text-slate-500 uppercase tracking-wider border-b pb-0.5">Total por Forma de Pagamento</h4>
+                    <div className="space-y-1">
+                      {(() => {
+                        const payTotals = calculateSalesPaymentBreakdown(viewingSettlement.sales);
+                        const activeForms = [
+                          { label: 'Dinheiro', val: payTotals.dinheiro, color: 'text-emerald-700' },
+                          { label: 'PIX', val: payTotals.pix, color: 'text-blue-700' },
+                          { label: 'Boleto', val: payTotals.boleto, color: 'text-amber-700' },
+                          { label: 'Cheque', val: payTotals.cheque, color: 'text-purple-700' },
+                          { label: 'A Prazo', val: payTotals.outros, color: 'text-rose-700' },
+                        ].filter(f => f.val > 0);
+
+                        if (activeForms.length === 0) {
+                          return <div className="text-[11px] text-slate-400 italic font-semibold p-1">Nenhum valor cobrado.</div>;
+                        }
+
+                        return activeForms.map(f => (
+                          <div key={f.label} className="flex justify-between text-[11px] font-bold text-slate-600 bg-white p-1.5 rounded border">
+                            <span>{f.label}</span>
+                            <span className={`font-mono font-black ${f.color}`}>R$ {f.val.toFixed(2)}</span>
+                          </div>
+                        ));
+                      })()}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Expenses Table */}
+              <div className="space-y-2">
+                <h4 className="text-[10px] font-black text-slate-600 uppercase tracking-wider border-b pb-1">Despesas Informadas</h4>
+                <div className="border rounded overflow-hidden">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="bg-slate-50 font-bold text-slate-500 text-[10px] uppercase">
+                        <th className="p-2.5">Descrição</th>
+                        <th className="p-2.5 text-right">Valor</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y font-medium text-slate-700">
+                      {viewingSettlement.expenses.map(e => (
+                        <tr key={e.id}>
+                          <td className="p-2.5 text-slate-900">{e.item}</td>
+                          <td className="p-2.5 text-right font-bold text-slate-900">R$ {e.value.toFixed(2)}</td>
+                        </tr>
+                      ))}
+                      {viewingSettlement.expenses.length === 0 && (
+                        <tr>
+                          <td colSpan={2} className="p-4 text-center text-slate-400 text-[10px] uppercase">Nenhuma despesa de viagem registrada</td>
+                        </tr>
+                      )}
+                      <tr className="bg-slate-50 font-bold">
+                        <td className="p-2.5 text-right uppercase">Total Despesas:</td>
+                        <td className="p-2.5 text-right">R$ {viewingSettlement.totalExpenses.toFixed(2)}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Suprimentos Table */}
+              <div className="space-y-2">
+                <h4 className="text-[10px] font-black text-slate-600 uppercase tracking-wider border-b pb-1">Suprimentos Registrados</h4>
+                <div className="border rounded overflow-hidden">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="bg-slate-50 font-bold text-slate-500 text-[10px] uppercase">
+                        <th className="p-2.5">Descrição / Motivo</th>
+                        <th className="p-2.5 text-right">Valor</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y font-medium text-slate-700">
+                      {(viewingSettlement.suprimentos || []).map(s => (
+                        <tr key={s.id}>
+                          <td className="p-2.5 text-slate-900">{s.item}</td>
+                          <td className="p-2.5 text-right font-bold text-slate-900">R$ {s.value.toFixed(2)}</td>
+                        </tr>
+                      ))}
+                      {(!viewingSettlement.suprimentos || viewingSettlement.suprimentos.length === 0) && (
+                        <tr>
+                          <td colSpan={2} className="p-4 text-center text-slate-400 text-[10px] uppercase">Nenhum suprimento de viagem registrado</td>
+                        </tr>
+                      )}
+                      <tr className="bg-slate-50 font-bold">
+                        <td className="p-2.5 text-right uppercase">Total Suprimentos:</td>
+                        <td className="p-2.5 text-right text-emerald-600 font-bold">R$ {(viewingSettlement.totalSuprimentos || 0).toFixed(2)}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Conferência de Vasilhames */}
+              {(viewingSettlement.missingBottlesQty !== undefined || viewingSettlement.vendaVasilhameQty !== undefined) && (
+                <div className="space-y-2">
+                  <h4 className="text-[10px] font-black text-slate-600 uppercase tracking-wider border-b pb-1">Conferência de Vasilhames</h4>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs font-bold text-slate-700">
+                    <div className="bg-slate-50 p-3 rounded">
+                      <span className="block text-[9px] text-slate-400 uppercase font-semibold">Faltaram no Descarrego:</span>
+                      <span>{viewingSettlement.missingBottlesQty ?? 0} un</span>
+                    </div>
+                    <div className="bg-slate-50 p-3 rounded">
+                      <span className="block text-[9px] text-slate-400 uppercase font-semibold">Vendas de Vasilhame:</span>
+                      <span>{viewingSettlement.vendaVasilhameQty ?? 0} un</span>
+                    </div>
+                    <div className="bg-slate-50 p-3 rounded">
+                      <span className="block text-[9px] text-slate-400 uppercase font-semibold">Comodatos de Vasilhame:</span>
+                      <span>{viewingSettlement.comodatoVasilhameQty ?? 0} un</span>
+                    </div>
+                    <div className={`p-3 rounded ${((viewingSettlement.finalUnaccountedShortage ?? 0) > 0) ? 'bg-amber-50 text-amber-800' : 'bg-emerald-50 text-emerald-800'}`}>
+                      <span className="block text-[9px] uppercase font-semibold">Falta Real na Carga:</span>
+                      <span>{viewingSettlement.finalUnaccountedShortage ?? 0} un</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Financial Returns and Discrepancies */}
+              <div className="space-y-2">
+                <h4 className="text-[10px] font-black text-slate-600 uppercase tracking-wider border-b pb-1">Conferência de Caixa</h4>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs font-bold text-slate-700">
+                  <div className="bg-slate-50 p-3 rounded">
+                    <span className="block text-[9px] text-slate-400 uppercase font-semibold">Esperado Líquido:</span>
+                    <span>R$ {viewingSettlement.totalToReceive.toFixed(2)}</span>
+                  </div>
+                  <div className="bg-slate-50 p-3 rounded">
+                    <span className="block text-[9px] text-slate-400 uppercase font-semibold">Total Entregue:</span>
+                    <span>R$ {viewingSettlement.totalDelivered.toFixed(2)}</span>
+                  </div>
+                  <div className={`p-3 rounded ${viewingSettlement.difference < 0 ? 'bg-rose-50 text-rose-800' : 'bg-emerald-50 text-emerald-800'}`}>
+                    <span className="block text-[9px] uppercase font-semibold">Diferença:</span>
+                    <span>R$ {viewingSettlement.difference.toFixed(2)}</span>
+                  </div>
+                  <div className="bg-slate-50 p-3 rounded col-span-2 md:col-span-1">
+                    <span className="block text-[9px] text-slate-400 uppercase font-semibold">Status PIX:</span>
+                    <span className="uppercase text-[10px]">{viewingSettlement.isReconciled ? 'Reconciliado' : 'Não Conciliado'}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Commission Closing Panel */}
+              <div className="bg-slate-900 text-white rounded-xl p-4 space-y-3 font-semibold text-xs">
+                <h4 className="text-[10px] font-black text-blue-400 uppercase tracking-wider border-b border-slate-800 pb-1.5">Resumo da Comissão a Pagar</h4>
+                
+                <div className="flex justify-between">
+                  <span className="text-slate-400">Comissão de Viagem ({viewingSettlement.commissionPercent}%):</span>
+                  <span>R$ {viewingSettlement.basicCommission.toFixed(2)}</span>
+                </div>
+
+                <div className="flex justify-between text-rose-400">
+                  <span>Descontos de Avarias / Perdas:</span>
+                  <span>- R$ {viewingSettlement.avariaDeduction.toFixed(2)}</span>
+                </div>
+
+                <div className="flex justify-between text-rose-400">
+                  <span>Descontos por Falta de Caixa:</span>
+                  <span>- R$ {viewingSettlement.shortageDeduction.toFixed(2)}</span>
+                </div>
+
+                <div className="border-t border-slate-800 pt-2 flex justify-between font-black text-sm">
+                  <span className="text-emerald-400">Comissão Líquida Final:</span>
+                  <span className="text-emerald-400 text-base">R$ {viewingSettlement.finalCommission.toFixed(2)}</span>
+                </div>
+              </div>
+
+              {viewingSettlement.observation && (
+                <div className="p-3 bg-slate-50 text-slate-600 rounded text-xs leading-relaxed font-medium">
+                  <p className="font-bold uppercase text-[9px] text-slate-400 tracking-wider mb-1">Observações do Acerto:</p>
+                  {viewingSettlement.observation}
+                </div>
+              )}
+
+            </div>
+
+            <div className="p-4 bg-slate-50 border-t flex justify-end gap-2">
+              <button
+                onClick={() => handlePrint(viewingSettlement)}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded text-xs font-bold uppercase tracking-wider cursor-pointer flex items-center gap-1.5"
+              >
+                <Printer size={14} />
+                Imprimir Recibo
+              </button>
+              <button
+                onClick={() => handlePrintCaixa(viewingSettlement)}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-xs font-bold uppercase tracking-wider cursor-pointer flex items-center gap-1.5"
+              >
+                <FileText size={14} />
+                Recibo de Caixa (Motorista)
+              </button>
+              <button
+                onClick={() => setViewingSettlement(null)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded text-xs font-bold uppercase tracking-wider cursor-pointer"
+              >
+                Fechar Detalhes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* RECONCILE MODAL */}
+      {reconcilingSettlement && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl shadow-xl max-w-xl w-full border border-slate-200 overflow-hidden">
+            <div className="p-4 bg-slate-900 text-white flex justify-between items-center">
+              <div>
+                <h3 className="text-sm font-bold uppercase tracking-tight">Conciliação de Múltiplos PIX</h3>
+                <p className="text-[10px] text-slate-400 uppercase mt-0.5 font-bold">Acerto Placa: {reconcilingSettlement.plate}</p>
+              </div>
+              <button
+                onClick={() => setReconcilingSettlement(null)}
+                className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <div className="bg-slate-50 p-3 rounded-lg grid grid-cols-3 gap-2 text-xs">
+                <div>
+                  <span className="text-slate-400 font-bold block uppercase text-[9px]">Valor Esperado</span>
+                  <span className="text-sm font-black text-slate-800 font-mono">
+                    R$ {reconcilingSettlement.payments.pix.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                  </span>
+                </div>
+                <div className="text-center">
+                  <span className="text-slate-400 font-bold block uppercase text-[9px]">Total Selecionado</span>
+                  <span className={`text-sm font-black font-mono ${
+                    Math.abs(
+                      bankTransactions.filter(tx => selectedTxIds.includes(tx.id)).reduce((sum, tx) => sum + tx.amount, 0) - 
+                      reconcilingSettlement.payments.pix
+                    ) < 0.01 
+                      ? 'text-emerald-600' 
+                      : 'text-amber-600'
+                  }`}>
+                    R$ {bankTransactions
+                      .filter(tx => selectedTxIds.includes(tx.id))
+                      .reduce((sum, tx) => sum + tx.amount, 0)
+                      .toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                  </span>
+                </div>
+                <div className="text-right">
+                  {(() => {
+                    const expected = reconcilingSettlement.payments.pix;
+                    const selected = bankTransactions.filter(tx => selectedTxIds.includes(tx.id)).reduce((sum, tx) => sum + tx.amount, 0);
+                    const diff = expected - selected;
+                    return (
+                      <>
+                        <span className="text-slate-400 font-bold block uppercase text-[9px]">
+                          {diff > 0.01 ? 'Falta para o total' : diff < -0.01 ? 'Superado' : 'Status'}
+                        </span>
+                        <span className={`text-sm font-black font-mono ${
+                          diff > 0.01 
+                            ? 'text-amber-600' 
+                            : diff < -0.01 
+                              ? 'text-blue-600' 
+                              : 'text-emerald-600'
+                        }`}>
+                          {diff > 0.01 
+                            ? `R$ ${diff.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}` 
+                            : diff < -0.01 
+                              ? `R$ ${Math.abs(diff).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}` 
+                              : 'Exato! ✅'
+                          }
+                        </span>
+                      </>
+                    );
+                  })()}
+                </div>
+              </div>
+
+              {Math.abs(
+                bankTransactions.filter(tx => selectedTxIds.includes(tx.id)).reduce((sum, tx) => sum + tx.amount, 0) - 
+                reconcilingSettlement.payments.pix
+              ) >= 0.01 && (
+                <div className="bg-amber-50 text-amber-800 p-2.5 rounded-lg text-[10px] font-bold flex items-start gap-1.5 border border-amber-200">
+                  <AlertCircle size={14} className="text-amber-600 shrink-0 mt-0.5" />
+                  <span>Atenção: O valor selecionado é diferente do valor esperado. Ao confirmar, as transações serão vinculadas, mas o acerto continuará pendente ("Aguardando PIX") até que o valor total seja liquidado.</span>
+                </div>
+              )}
+
+              <p className="text-xs text-slate-500 font-medium">
+                Selecione um ou mais PIX recebidos no extrato bancário para liquidar o valor informado. Transações já vinculadas a este acerto aparecem marcadas.
+              </p>
+
+              {/* Search input in modal */}
+              <div className="relative">
+                <Search size={14} className="absolute left-2.5 top-2.5 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Pesquisar por data (ex: 26/06), nome ou valor..."
+                  value={searchPixQuery}
+                  onChange={e => setSearchPixQuery(e.target.value)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded pl-8 pr-3 py-1.5 text-xs outline-none focus:bg-white focus:border-blue-400 font-medium"
+                />
+              </div>
+
+              {/* Statement List to choose from */}
+              <div className="max-h-[250px] overflow-y-auto border border-slate-100 rounded-lg divide-y divide-slate-100">
+                {bankTransactions
+                  .filter(tx => !tx.isReconciled || tx.reconciledWithSettlementId === reconcilingSettlement.id)
+                  .filter(tx => {
+                    const query = searchPixQuery.toLowerCase().trim();
+                    if (!query) return true;
+
+                    const matchesDesc = tx.description.toLowerCase().includes(query);
+                    const matchesAmount = tx.amount.toString().includes(query) || 
+                                          tx.amount.toFixed(2).includes(query) ||
+                                          tx.amount.toFixed(2).replace('.', ',').includes(query);
+                    const matchesRef = (tx.documentRef || '').toLowerCase().includes(query);
+                    const matchesDate = tx.date.includes(query) || (() => {
+                      const [y, m, d] = tx.date.split('-');
+                      if (y && m && d) {
+                        const brDate = `${d}/${m}/${y}`;
+                        const brDateShort = `${d}/${m}`;
+                        return brDate.includes(query) || brDateShort.includes(query);
+                      }
+                      return false;
+                    })();
+
+                    return matchesDesc || matchesAmount || matchesRef || matchesDate;
+                  })
+                  .map(tx => {
+                    const isChecked = selectedTxIds.includes(tx.id);
+                    return (
+                      <label 
+                        key={tx.id} 
+                        className={`p-3 flex items-center justify-between text-xs hover:bg-slate-50 font-medium cursor-pointer transition-colors ${
+                          isChecked ? 'bg-emerald-50/40 border-l-4 border-emerald-500' : ''
+                        }`}
+                      >
+                        <div className="flex items-center space-x-3">
+                          <input 
+                            type="checkbox" 
+                            checked={isChecked}
+                            onChange={() => {
+                              setSelectedTxIds(prev => 
+                                prev.includes(tx.id) ? prev.filter(id => id !== tx.id) : [...prev, tx.id]
+                              );
+                            }}
+                            className="h-4 w-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500 cursor-pointer"
+                          />
+                          <div>
+                            <p className="font-bold text-slate-900">{tx.description}</p>
+                            <p className="text-[10px] text-slate-400 uppercase font-bold mt-0.5">
+                              Ref: {tx.documentRef || '-'} | Data: {formatDateStringBR(tx.date)} {tx.reconciledWithSettlementId === reconcilingSettlement.id && (
+                                <span className="text-emerald-600 font-extrabold ml-1 uppercase text-[8px] tracking-wider">[Vinculado]</span>
+                              )}
+                            </p>
+                          </div>
+                        </div>
+                        <span className="font-extrabold text-slate-800 font-mono">R$ {tx.amount.toFixed(2)}</span>
+                      </label>
+                    );
+                  })}
+                {bankTransactions.filter(tx => !tx.isReconciled || tx.reconciledWithSettlementId === reconcilingSettlement.id).length === 0 && (
+                  <div className="p-8 text-center text-slate-400 uppercase tracking-wider text-[10px] font-bold">Nenhuma transação bancária PIX disponível. Importe ou simule um arquivo bancário primeiro.</div>
+                )}
+                {bankTransactions.filter(tx => !tx.isReconciled || tx.reconciledWithSettlementId === reconcilingSettlement.id).length > 0 &&
+                 bankTransactions
+                  .filter(tx => !tx.isReconciled || tx.reconciledWithSettlementId === reconcilingSettlement.id)
+                  .filter(tx => {
+                    const query = searchPixQuery.toLowerCase().trim();
+                    if (!query) return true;
+
+                    const matchesDesc = tx.description.toLowerCase().includes(query);
+                    const matchesAmount = tx.amount.toString().includes(query) || 
+                                          tx.amount.toFixed(2).includes(query) ||
+                                          tx.amount.toFixed(2).replace('.', ',').includes(query);
+                    const matchesRef = (tx.documentRef || '').toLowerCase().includes(query);
+                    const matchesDate = tx.date.includes(query) || (() => {
+                      const [y, m, d] = tx.date.split('-');
+                      if (y && m && d) {
+                        const brDate = `${d}/${m}/${y}`;
+                        const brDateShort = `${d}/${m}`;
+                        return brDate.includes(query) || brDateShort.includes(query);
+                      }
+                      return false;
+                    })();
+
+                    return matchesDesc || matchesAmount || matchesRef || matchesDate;
+                  }).length === 0 && (
+                    <div className="p-8 text-center text-slate-400 uppercase tracking-wider text-[10px] font-bold">Nenhuma transação corresponde à busca.</div>
+                  )}
+              </div>
+            </div>
+
+            <div className="p-4 bg-slate-50 border-t flex justify-end items-center">
+              <div className="flex space-x-2">
+                <button
+                  onClick={() => setReconcilingSettlement(null)}
+                  className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold uppercase rounded cursor-pointer"
+                >
+                  Cancelar
+                </button>
+                <button
+                  onClick={() => handleConfirmReconciliation(selectedTxIds)}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold uppercase rounded shadow cursor-pointer"
+                >
+                  Confirmar Conciliação ({selectedTxIds.length})
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MANUAL RECONCILIATION MODAL */}
+      {txToManualReconcile && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full border border-slate-200 overflow-hidden my-8">
+            <div className="p-4 bg-indigo-900 text-white flex justify-between items-center">
+              <div>
+                <h3 className="text-sm font-bold uppercase tracking-tight">Conciliação Manual Avulsa</h3>
+              </div>
+              <button onClick={() => setTxToManualReconcile(null)} className="text-indigo-200 hover:text-white cursor-pointer">
+                <X size={20} />
+              </button>
+            </div>
+            
+            <div className="p-6">
+              <p className="text-sm text-slate-600 mb-4">
+                Informe o motivo da conciliação avulsa para a transação <strong>{txToManualReconcile.description}</strong> no valor de <strong>R$ {txToManualReconcile.amount.toFixed(2)}</strong>. Ela não será vinculada a nenhum acerto.
+              </p>
+              
+              <div className="mb-4">
+                <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">Motivo / Observação</label>
+                <textarea
+                  value={manualReconcileReason}
+                  onChange={(e) => setManualReconcileReason(e.target.value)}
+                  placeholder="Ex: Recebimento de sucata, acerto antigo, etc..."
+                  className="w-full border border-slate-300 p-2 rounded text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 h-24 resize-none"
+                />
+              </div>
+            </div>
+
+            <div className="p-4 bg-slate-50 border-t flex justify-end space-x-2">
+              <button
+                onClick={() => setTxToManualReconcile(null)}
+                className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold uppercase rounded cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => {
+                  if (manualReconcileReason.trim() === '') {
+                    alert('Informe um motivo para a conciliação manual.');
+                    return;
+                  }
+                  manuallyReconcileBankTransaction(txToManualReconcile.id, manualReconcileReason.trim());
+                  setTxToManualReconcile(null);
+                  setManualReconcileReason('');
+                }}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-[10px] font-bold uppercase rounded shadow cursor-pointer"
+              >
+                Confirmar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* DELETE BANK TRANSACTION MODAL */}
+      {txToDelete && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full border border-slate-200 overflow-hidden my-8">
+            <div className="p-4 bg-rose-900 text-white flex justify-between items-center">
+              <div>
+                <h3 className="text-sm font-bold uppercase tracking-tight">Excluir Transação Bancária</h3>
+              </div>
+              <button onClick={() => setTxToDelete(null)} className="text-rose-200 hover:text-white cursor-pointer">
+                <X size={20} />
+              </button>
+            </div>
+            
+            <div className="p-6">
+              <p className="text-sm text-slate-600 mb-4">
+                Deseja realmente excluir a transação <strong>{txToDelete.description}</strong> no valor de <strong>R$ {txToDelete.amount.toFixed(2)}</strong>?
+              </p>
+              <p className="text-xs text-rose-600 font-semibold bg-rose-50 p-2.5 rounded border border-rose-200">
+                Esta ação é irreversível e a transação não estará mais disponível para conciliação.
+              </p>
+            </div>
+
+            <div className="p-4 bg-slate-50 border-t flex justify-end space-x-2">
+              <button
+                onClick={() => setTxToDelete(null)}
+                className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold uppercase rounded cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => {
+                  removeBankTransaction(txToDelete.id);
+                  setTxToDelete(null);
+                }}
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white text-[10px] font-bold uppercase rounded shadow cursor-pointer"
+              >
+                Excluir
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* QUANTITY MISMATCH WARNING CONFIRMATION MODAL */}
+      {showQtyWarningModal && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full border border-slate-200 overflow-hidden my-8">
+            <div className="p-4 bg-amber-600 text-white flex justify-between items-center">
+              <div className="flex items-center gap-2">
+                <AlertCircle size={20} />
+                <h3 className="text-sm font-bold uppercase tracking-tight">Divergência de Quantidades</h3>
+              </div>
+              <button onClick={() => setShowQtyWarningModal(false)} className="text-amber-100 hover:text-white cursor-pointer">
+                <X size={20} />
+              </button>
+            </div>
+            
+            <div className="p-6 space-y-4">
+              <p className="text-xs text-slate-600 font-medium leading-relaxed">
+                As quantidades de vendas lançadas no acerto <strong>não coincidem</strong> com as quantidades recomendadas (descarregadas) para este motorista.
+              </p>
+
+              {(() => {
+                const enteredWaterQty = sales
+                  .filter(s => s.item.toLowerCase().includes('água') || s.item.toLowerCase().includes('agua') || s.item.toLowerCase().includes('bonifica'))
+                  .reduce((sum, s) => sum + s.qty, 0);
+                const enteredVasilhameQty = sales
+                  .filter(s => s.item.toLowerCase().includes('vasilhame') && !s.item.toLowerCase().includes('retorno'))
+                  .reduce((sum, s) => sum + s.qty, 0);
+
+                return (
+                  <div className="bg-slate-50 rounded-lg p-3 border border-slate-200/60 divide-y divide-slate-200">
+                    <div className="pb-2 flex justify-between items-center text-[10px] font-black text-slate-500 uppercase tracking-wider">
+                      <span>Produto</span>
+                      <div className="flex gap-6">
+                        <span>Meta/Sugerido</span>
+                        <span>Lançado</span>
+                      </div>
+                    </div>
+                    
+                    {/* Water comparison */}
+                    <div className="py-2.5 flex justify-between items-center text-xs">
+                      <span className="font-bold text-slate-700">💧 Água + Bonificação 20L</span>
+                      <div className="flex gap-12 font-mono font-bold">
+                        <span className="text-slate-500 w-8 text-right">{suggestedWaterQty} un</span>
+                        <span className={`w-8 text-right ${enteredWaterQty === suggestedWaterQty ? 'text-emerald-600' : 'text-amber-600 font-extrabold'}`}>
+                          {enteredWaterQty} un
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Vasilhame comparison */}
+                    <div className="pt-2.5 flex justify-between items-center text-xs">
+                      <span className="font-bold text-slate-700">🪣 Vasilhame + Comodato</span>
+                      <div className="flex gap-12 font-mono font-bold">
+                        <span className="text-slate-500 w-8 text-right">{currentTargetVasilhameQty} un</span>
+                        <span className={`w-8 text-right ${enteredVasilhameQty === currentTargetVasilhameQty ? 'text-emerald-600' : 'text-amber-600 font-extrabold'}`}>
+                          {enteredVasilhameQty} un
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              <div className="bg-amber-50 text-amber-800 p-3 rounded-lg text-[10px] font-bold flex items-start gap-2 border border-amber-200">
+                <AlertTriangle size={16} className="text-amber-600 shrink-0 mt-0.5" />
+                <span className="leading-relaxed">
+                  Atenção: Ao salvar com divergência, as diferenças de estoque podem gerar descontos adicionais na comissão ou faltas registradas. Deseja prosseguir assim mesmo?
+                </span>
+              </div>
+            </div>
+
+            <div className="p-4 bg-slate-50 border-t flex justify-between gap-2">
+              <button
+                onClick={() => setShowQtyWarningModal(false)}
+                className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-black uppercase rounded-lg transition-colors cursor-pointer"
+              >
+                Voltar e Ajustar
+              </button>
+              <button
+                onClick={() => {
+                  handleSaveSettlement(false, true);
+                }}
+                className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white text-[10px] font-black uppercase rounded-lg shadow transition-colors cursor-pointer flex items-center gap-1"
+              >
+                <Check size={12} />
+                Prosseguir e Salvar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CASH ADVANCE MODAL */}
+      {cashAdvanceModalOpen && cashAdvanceMovement && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full border border-slate-200 overflow-hidden my-8">
+            <div className="p-4 bg-emerald-950 text-white flex justify-between items-center">
+              <div className="flex items-center gap-2">
+                <Coins className="text-emerald-400" size={18} />
+                <h3 className="text-sm font-bold uppercase tracking-tight">Incluir Dinheiro no Caixa do Motorista</h3>
+              </div>
+              <button 
+                onClick={() => {
+                  setCashAdvanceModalOpen(false);
+                  setCashAdvanceMovement(null);
+                  setCashAdvanceValue('');
+                  setCashAdvanceReason('');
+                }} 
+                className="text-emerald-200 hover:text-white cursor-pointer"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            
+            <div className="p-6 space-y-4">
+              <div className="bg-emerald-50 rounded-lg p-3 border border-emerald-200/60 text-emerald-900 text-xs space-y-1">
+                <div><strong>Motorista:</strong> {cashAdvanceMovement.driver}</div>
+                <div><strong>Placa / Veículo:</strong> {cashAdvanceMovement.plate}</div>
+                <div><strong>Data:</strong> {new Date().toLocaleDateString('pt-BR')}</div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">Valor do Adiantamento (R$)</label>
+                <div className="relative">
+                  <span className="absolute left-3 top-2.5 text-slate-400 font-bold text-sm">R$</span>
+                  <input
+                    type="text"
+                    value={cashAdvanceValue}
+                    onChange={(e) => setCashAdvanceValue(e.target.value)}
+                    placeholder="0,00"
+                    className="w-full border border-slate-300 pl-9 pr-3 py-2 rounded text-sm font-bold focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+                  />
+                </div>
+                <p className="text-[10px] text-slate-400 mt-1">Este valor será entregue em dinheiro ao motorista para despesas ou troco de saída.</p>
+              </div>
+
+              <div>
+                <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">Motivo do Repasse</label>
+                <input
+                  type="text"
+                  value={cashAdvanceReason}
+                  onChange={(e) => setCashAdvanceReason(e.target.value)}
+                  placeholder="Ex: Troco inicial para viagem, adiantamento de viagem"
+                  className="w-full border border-slate-300 px-3 py-2 rounded text-sm focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+                />
+              </div>
+
+              {cashAdvanceMovement.cashAdvances && cashAdvanceMovement.cashAdvances.length > 0 && (
+                <div className="border-t pt-3">
+                  <span className="block text-[10px] uppercase font-bold text-slate-500 mb-1.5">Repasses já efetuados nesta viagem:</span>
+                  <div className="space-y-1.5">
+                    {cashAdvanceMovement.cashAdvances.map((adv: any) => (
+                      <div key={adv.id} className="flex justify-between items-center text-[11px] bg-slate-50 p-2 rounded border border-slate-150">
+                        <div>
+                          <span className="font-semibold text-slate-800">{adv.reason}</span>
+                          <span className="text-[9px] text-slate-400 block">{new Date(adv.timestamp).toLocaleTimeString('pt-BR')} - por {adv.operator}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <strong className="text-emerald-700 font-mono">R$ {adv.value.toFixed(2)}</strong>
+                          <button
+                            onClick={() => handlePrintCashAdvance({
+                              id: adv.id,
+                              movementId: cashAdvanceMovement.id,
+                              driverName: cashAdvanceMovement.driver,
+                              plate: cashAdvanceMovement.plate,
+                              value: adv.value,
+                              reason: adv.reason,
+                              timestamp: adv.timestamp,
+                              operator: adv.operator
+                            })}
+                            className="text-emerald-600 hover:text-emerald-800 font-semibold underline text-[10px]"
+                            title="Imprimir novamente"
+                          >
+                            Imprimir
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 bg-slate-50 border-t flex justify-end space-x-2">
+              <button
+                onClick={() => {
+                  setCashAdvanceModalOpen(false);
+                  setCashAdvanceMovement(null);
+                  setCashAdvanceValue('');
+                  setCashAdvanceReason('');
+                }}
+                className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold uppercase rounded cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => {
+                  handleSaveCashAdvance();
+                  // Close the modal after save/print
+                  setCashAdvanceModalOpen(false);
+                  setCashAdvanceMovement(null);
+                }}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] font-bold uppercase rounded shadow cursor-pointer flex items-center gap-1"
+              >
+                <Printer size={12} />
+                <span>Emitir e Imprimir</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+};

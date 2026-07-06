@@ -1,0 +1,14 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Catch-all default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Allow read/write for the unified application state
+    match /appState/current {
+      allow read, write: if true;
+    }
+  }
+}

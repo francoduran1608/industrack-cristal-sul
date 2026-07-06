@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+@media print {
+  /* Allow root and wrapping elements of the layout to span and print on multiple pages */
+  html, body, #root,
+  main,
+  .flex-col,
+  .overflow-hidden,
+  .overflow-auto,
+  .overflow-y-auto {
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  /* Hide sidebars, navigation, top bar, filters and all action buttons */
+  aside,
+  header,
+  button,
+  .print\:hidden,
+  [class*="print:hidden"] {
+    display: none !important;
+  }
+
+  /* Target body background and margins for standard print layout and exact color replication */
+  body {
+    background-color: white !important;
+    background: white !important;
+    color: black !important;
+    margin: 0 !important;
+    padding: 1cm !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Print optimization for data tables */
+  table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    page-break-inside: auto !important;
+  }
+
+  tr {
+    page-break-inside: avoid !important;
+    page-break-after: auto !important;
+  }
+
+  thead {
+    display: table-header-group !important;
+  }
+
+  td, th {
+    white-space: normal !important;
+  }
+
+  /* Document specific containers */
+  #pdf-container, #printable-fuel-report {
+    padding: 0 !important;
+    margin: 0 !important;
+    border: none !important;
+    box-shadow: none !important;
+    background: white !important;
+  }
+}
+
