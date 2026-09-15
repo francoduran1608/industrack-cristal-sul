@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useStore, cleanOccurrenceTypeName, getProductionCode } from '../store';
+import { useStore, cleanOccurrenceTypeName, getProductionCode, normalizeStockProductKey, isRewashType } from '../store';
 import { Movement, ProductionControl, AvariaEntry, CustomAvariaType, DifferenceReasonBreakdown } from '../types';
 import { 
   X, 
@@ -19,7 +19,10 @@ import {
   Printer,
   Clock,
   Play,
-  Lock
+  Lock,
+  Package,
+  Truck,
+  Upload
 } from 'lucide-react';
 
 const deduplicateAvarias = (entries: AvariaEntry[]): AvariaEntry[] => {
@@ -32,7 +35,7 @@ const deduplicateAvarias = (entries: AvariaEntry[]): AvariaEntry[] => {
       seen.add(key);
       result.push({ ...item, type: cleanedName });
     } else {
-      const existing = result.find(r => cleanOccurrenceTypeName(r.type).toLowerCase().trim() === key);
+      const existing = result.find(r => cleanOccurrenceTypeName(r?.type || '').toLowerCase().trim() === key);
       if (existing) {
         existing.qty += item.qty;
       }
@@ -41,18 +44,34 @@ const deduplicateAvarias = (entries: AvariaEntry[]): AvariaEntry[] => {
   return result;
 };
 
-const isPurchaseType = (type: string, customAvariaTypesList: CustomAvariaType[] = []): boolean => {
+const isPurchaseType = (type: any, customAvariaTypesList: CustomAvariaType[] = []): boolean => {
+  if (!type || typeof type !== 'string') return false;
+  if (isTrocaAvariaType(type)) return false;
   const cleaned = cleanOccurrenceTypeName(type).toLowerCase().trim();
-  const found = customAvariaTypesList.find(t => cleanOccurrenceTypeName(t.type).toLowerCase().trim() === cleaned);
+  const found = customAvariaTypesList.find(t => cleanOccurrenceTypeName(t?.type || '').toLowerCase().trim() === cleaned);
   if (found) {
     return found.category === 'compra' || found.category === 'vasilhame_rota';
   }
-  const norm = type.toLowerCase().trim();
+  const norm = (type || '').toLowerCase().trim();
   return norm === 'vasilhame de rota' || norm.startsWith('+') || norm.includes('compra') || norm.includes('são pedro') || norm.includes('sao pedro') || norm.includes('prime') || norm.includes('rota');
 };
 
-const isProprioOnlyAvariaType = (typeName: string): boolean => {
-  const norm = typeName.toLowerCase().trim();
+const isTrocaAvariaType = (type: any): boolean => {
+  if (!type || typeof type !== 'string') return false;
+  const norm = (type || '').toLowerCase().trim();
+  return (
+    norm === 'troca avaria/água' ||
+    norm === 'troca avarias/água' ||
+    norm === 'troca avaria/agua' ||
+    norm === 'troca avarias/agua' ||
+    norm.includes('troca avaria') ||
+    norm.includes('troca avarias')
+  );
+};
+
+const isProprioOnlyAvariaType = (typeName: any): boolean => {
+  if (!typeName || typeof typeName !== 'string') return false;
+  const norm = (typeName || '').toLowerCase().trim();
   return (
     norm === 'microfuro' ||
     norm === 'vencido do mês (seco)' ||
@@ -79,11 +98,135 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
   focusPhase = 'all',
   transitionOnSave = null
 }) => {
-  const { movements, updateMovementDetails, updateKanbanStep, customAvariaTypes = [], addCustomAvariaType, removeCustomAvariaType, currentUser, companyLogo, productionOpen, driverSettlements = [] } = useStore();
-  const hasWriteAccess = currentUser?.role !== 'visualizador';
+  const { movements, updateMovementDetails, updateKanbanStep, customAvariaTypes = [], addCustomAvariaType, removeCustomAvariaType, currentUser, companyLogo, productionOpen, driverSettlements = [], initialStockLevels = {}, customStockProducts = [], manualStockAdjustments = [], driverTripLoads = [] } = useStore();
+  const hasWriteAccess = currentUser?.role !== 'visualizador' && currentUser?.role !== 'supervisor';
   const isProductionOpen = productionOpen?.[currentUser?.unit || 'matriz'] !== false;
 
   const liveVehicle = movements.find(m => m.id === vehicle.id) || vehicle;
+
+  // Stock calculator helper for empty bottles to fulfill "identificar o estoque de vasilhame vazios"
+  const calculateEmptyStockLevels = () => {
+    const currentUserUnit = currentUser?.unit || 'matriz';
+    const unitMovements = (movements || []).filter(m => !m.isInitialTrip && (m.unit || 'matriz') === currentUserUnit);
+    const initial = initialStockLevels || {};
+    
+    const stock: Record<string, number> = {
+      'vasilhame são pedro': initial[`${currentUserUnit}_vasilhame são pedro`] || 0,
+      'vasilhame prime': initial[`${currentUserUnit}_vasilhame prime`] || 0,
+      'vasilhame de rota': initial[`${currentUserUnit}_vasilhame de rota`] || 0,
+    };
+
+    (customStockProducts || []).forEach(p => {
+      const pName = typeof p === 'string' ? p : (p?.name || '');
+      const norm = pName.toLowerCase().trim();
+      if (norm && (norm.includes('vasilhame') || norm.includes('vazio'))) {
+        stock[norm] = initial[`${currentUserUnit}_${norm}`] || 0;
+      }
+    });
+
+    const isPurchaseTypeLocal = (typeId: any) => {
+      if (!typeId || typeof typeId !== 'string') return false;
+      const norm = typeId.toLowerCase();
+      const matched = customAvariaTypes.find(c => c.id === typeId || (c?.type || '').toLowerCase() === norm);
+      if (matched) return matched.category === 'compra' || matched.category === 'vasilhame_rota';
+      return norm.includes('compra') || norm.includes('rota') || norm.includes('adicion') || norm.includes('aquisi');
+    };
+
+    const isRewashTypeLocal = (typeId: any) => {
+      if (!typeId || typeof typeId !== 'string') return false;
+      const norm = typeId.toLowerCase();
+      const matched = customAvariaTypes.find(c => c.id === typeId || (c?.type || '').toLowerCase() === norm);
+      if (matched) return matched.category === 'retorno_lavagem';
+      return norm.includes('corpo estranho') || norm.includes('mal lavado');
+    };
+
+    unitMovements.forEach(m => {
+      if (!m.productionControl) return;
+
+      const descList = m.productionControl.avariasDescarregamento || [];
+      const descLosses = descList.filter(a => !isPurchaseTypeLocal(a.type) && !isRewashTypeLocal(a.type));
+      const descPurchases = descList.filter(a => isPurchaseTypeLocal(a.type));
+
+      const carregList = m.productionControl.avariasCarregamento || [];
+      const carregLosses = carregList.filter(c => !isPurchaseTypeLocal(c.type) && !isRewashTypeLocal(c.type));
+      const carregPurchases = carregList.filter(c => isPurchaseTypeLocal(c.type));
+
+      const isUnloadingFinished = 
+        m.status === 'concluido' || 
+        m.status === 'saida' || 
+        (m.kanbanStep !== undefined && m.kanbanStep !== 'aguardando_descarregamento' && m.kanbanStep !== 'descarregamento');
+
+      const isLoadingFinished = 
+        m.status === 'concluido' || 
+        m.status === 'saida' || 
+        (m.kanbanStep === 'concluido');
+
+      const isUnloadingSentToProduction = isUnloadingFinished && !m.productionReverted;
+      const isLoadingSentToProduction = isLoadingFinished && !m.productionReverted;
+
+      if (isUnloadingSentToProduction) {
+        descLosses.forEach(item => {
+          const normName = normalizeStockProductKey(item.type);
+          if (stock[normName] !== undefined) {
+            stock[normName] -= item.qty;
+          }
+        });
+      }
+
+      if (isLoadingSentToProduction) {
+        carregLosses.forEach(item => {
+          const normName = normalizeStockProductKey(item.type);
+          if (stock[normName] !== undefined) {
+            stock[normName] -= item.qty;
+          }
+        });
+      }
+
+      if (!m.productionReverted) {
+        descPurchases.forEach(item => {
+          const normName = normalizeStockProductKey(item.type);
+          const approvedQty = item.qty;
+          if (approvedQty > 0) {
+            if (stock[normName] === undefined) {
+              stock[normName] = 0;
+            }
+            stock[normName] -= approvedQty;
+          }
+        });
+
+        carregPurchases.forEach(item => {
+          const normName = normalizeStockProductKey(item.type);
+          const approvedQty = item.qty;
+          if (approvedQty > 0) {
+            if (stock[normName] === undefined) {
+              stock[normName] = 0;
+            }
+            stock[normName] -= approvedQty;
+          }
+        });
+
+        if (m.productionControl.retiradaVasilhameCarga) {
+          if (stock['vasilhame de rota'] === undefined) {
+            stock['vasilhame de rota'] = 0;
+          }
+          stock['vasilhame de rota'] += m.productionControl.retiradaVasilhameCarga;
+        }
+      }
+    });
+
+    (manualStockAdjustments || []).filter(a => !a.unit || a.unit === currentUserUnit).forEach(adj => {
+      const normName = adj.product.toLowerCase().trim();
+      if (stock[normName] !== undefined) {
+        if (adj.type === 'entrada') {
+          stock[normName] += adj.qty;
+        } else {
+          stock[normName] -= adj.qty;
+        }
+      }
+    });
+
+    return stock;
+  };
 
   const isSettled = React.useMemo(() => {
     if (!liveVehicle) return false;
@@ -121,7 +264,11 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
   // Derived currentStep
   const currentStep = liveVehicle.kanbanStep || 'aguardando_descarregamento';
 
-  const isStage1Editable = !isConcluded && (currentStep === 'descarregamento' || currentStep === 'aguardando_carregamento' || currentStep === 'carregamento') && !isReadOnly;
+  const [isUnloadingUnlocked, setIsUnloadingUnlocked] = useState(false);
+  const [showUnlockModal, setShowUnlockModal] = useState(false);
+  const [unlockReason, setUnlockReason] = useState('');
+
+  const isStage1Editable = !isConcluded && (currentStep === 'descarregamento' || ((currentStep === 'aguardando_carregamento' || currentStep === 'carregamento') && isUnloadingUnlocked)) && !isReadOnly;
   const isStage2Editable = !isConcluded && currentStep === 'carregamento' && !isReadOnly;
 
   const canRevert = currentStep !== 'aguardando_descarregamento' && !isReadOnly;
@@ -175,6 +322,8 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
   const [descarregadoQty, setDescarregadoQty] = useState(vehicle.productionControl?.descarregadoQty || 0);
   const [retornoVasilhameCheio, setRetornoVasilhameCheio] = useState(vehicle.productionControl?.retornoVasilhameCheio || 0);
   const [retiradaVasilhameCarga, setRetiradaVasilhameCarga] = useState(vehicle.productionControl?.retiradaVasilhameCarga || 0);
+  const [vasilhamesRetornadosLavagem, setVasilhamesRetornadosLavagem] = useState(vehicle.productionControl?.vasilhamesRetornadosLavagem || 0);
+  const [cleanCargo, setCleanCargo] = useState(vehicle.productionControl?.cleanCargo || false);
   const effectiveRetornoCheio = isProprio ? retornoVasilhameCheio : 0;
 
   // List of parsed/entered lot quantities (Enter key system)
@@ -191,27 +340,65 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
   const [expectedDischarge, setExpectedDischarge] = useState<number>(0);
   const [manualExpectedOverride, setManualExpectedOverride] = useState<boolean>(false);
   
+  const getTripSalesHelper = (mvt: typeof vehicle, allMovements: typeof movements) => {
+    if (mvt.type === 'saida') {
+      return mvt.productionControl?.mobileSales || [];
+    }
+    const departures = allMovements.filter(x => 
+      x.type === 'saida' && 
+      x.plate.toLowerCase() === mvt.plate.toLowerCase() && 
+      x.id !== mvt.id &&
+      new Date(x.exitTimestamp || x.timestamp).getTime() < new Date(mvt.entryTimestamp || mvt.timestamp).getTime()
+    );
+    departures.sort((a, b) => new Date(b.exitTimestamp || b.timestamp).getTime() - new Date(a.exitTimestamp || a.timestamp).getTime());
+    const precedingSaida = departures[0];
+    return precedingSaida?.productionControl?.mobileSales || [];
+  };
+
+  const mobileSales = getTripSalesHelper(liveVehicle, movements);
+  const totalTrocaVasilhames = mobileSales
+    .filter((s: any) => s.productType === 'troca' || (s.item && s.item.toLowerCase().includes('troca')))
+    .reduce((sum: number, s: any) => sum + (s.exchangeAvariasQty || s.qty || 0), 0);
+
   const [differenceReasonsBreakdown, setDifferenceReasonsBreakdown] = useState<DifferenceReasonBreakdown[]>(() => {
-    return vehicle.productionControl?.differenceReasonsBreakdown || [
+    const loaded = liveVehicle.productionControl?.differenceReasonsBreakdown;
+    const sales = getTripSalesHelper(vehicle, movements);
+    const initialTrocaVasilhames = sales
+      .filter((s: any) => s.productType === 'troca' || (s.item && s.item.toLowerCase().includes('troca')))
+      .reduce((sum: number, s: any) => sum + (s.exchangeAvariasQty || s.qty || 0), 0);
+
+    const defaults: DifferenceReasonBreakdown[] = [
       { reason: 'venda', qty: 0 },
       { reason: 'vasilhame_cliente', qty: 0 },
       { reason: 'comodato', qty: 0 },
+      { reason: 'troca_avarias', qty: initialTrocaVasilhames },
       { reason: 'falta', qty: 0 },
       { reason: 'outros', qty: 0 }
     ];
+    if (loaded) {
+      return defaults.map(d => {
+        const found = loaded.find(l => l.reason === d.reason);
+        if (d.reason === 'troca_avarias') {
+          return found ? found : { ...d, qty: initialTrocaVasilhames };
+        }
+        return found ? found : d;
+      });
+    }
+    return defaults;
   });
 
   const c_qty = differenceReasonsBreakdown.find(b => b.reason === 'vasilhame_cliente')?.qty || 0;
   const com_qty = differenceReasonsBreakdown.find(b => b.reason === 'comodato')?.qty || 0;
+  const troca_qty = differenceReasonsBreakdown.find(b => b.reason === 'troca_avarias')?.qty || 0;
   const totalUnloaded = descarregadoQty + (effectiveRetornoCheio || 0);
-  const diffQty = expectedDischarge > 0 ? (expectedDischarge + c_qty + com_qty) - totalUnloaded : 0;
+  const diffQty = expectedDischarge > 0 ? (expectedDischarge + troca_qty + c_qty + com_qty) - totalUnloaded : 0;
   
   const isDetailedDifference = true;
 
   // Avarias at descarregamento (Discharge damages)
   const [avariasDesc, setAvariasDesc] = useState<AvariaEntry[]>(() => {
-    const isProprio = vehicle.ownerType === 'proprio';
-    let list = vehicle.productionControl?.avariasDescarregamento || [
+    const isProprio = liveVehicle.ownerType === 'proprio';
+    let list = liveVehicle.productionControl?.avariasDescarregamento || [
       { type: 'vencido', qty: 0 },
       { type: 'cheiro', qty: 0 },
       { type: 'lodo', qty: 0 },
@@ -223,17 +410,44 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
         list = [...list, { type: 'vasilhame de rota', qty: 0 }];
       }
     }
+
+    const salesForAvarias = getTripSalesHelper(liveVehicle, movements);
+    const tTroca = salesForAvarias
+      .filter((s: any) => s.productType === 'troca' || (s.item && s.item.toLowerCase().includes('troca')))
+      .reduce((sum: number, s: any) => sum + (s.exchangeAvariasQty || s.qty || 0), 0);
+
+    const hasTroca = list.some(item => isTrocaAvariaType(item.type));
+    if (!hasTroca) {
+      list = [...list, { type: 'troca avaria/água', qty: tTroca }];
+    } else {
+      list = list.map(item => {
+        if (isTrocaAvariaType(item.type)) {
+          const savedItem = (liveVehicle.productionControl?.avariasDescarregamento || []).find(it => isTrocaAvariaType(it.type));
+          return { ...item, qty: savedItem ? savedItem.qty : tTroca };
+        }
+        return item;
+      });
+    }
+
+    // Clean up legacy
+    list = list.filter(item => (item?.type || '').toLowerCase().trim() !== 'vasilhame avaria troca');
+
     return deduplicateAvarias(list);
   });
-  const [avariasDescPhoto, setAvariasDescPhoto] = useState<string>(vehicle.productionControl?.avariasDescarregamentoPhoto || '');
+  const [avariasDescPhoto, setAvariasDescPhoto] = useState<string>(liveVehicle.productionControl?.avariasDescarregamentoPhoto || '');
 
   // Avarias at carregamento (Loading damages)
   const [avariasCarreg, setAvariasCarreg] = useState<AvariaEntry[]>(() => {
     const isProprio = vehicle.ownerType === 'proprio';
     let list = vehicle.productionControl?.avariasCarregamento || [
+      { type: 'vencido', qty: 0 },
+      { type: 'cheiro', qty: 0 },
+      { type: 'lodo', qty: 0 },
+      { type: 'quebrado', qty: 0 },
       { type: 'quebra na maquina', qty: 0 },
       { type: 'quebra carregamento', qty: 0 },
-      { type: 'vencido', qty: 0 },
+      { type: 'corpo estranho', qty: 0 },
+      { type: 'mal lavado', qty: 0 },
       { type: 'ressecado', qty: 0 },
     ];
     if (isProprio) {
@@ -247,10 +461,76 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
   const [avariasCarregPhoto, setAvariasCarregPhoto] = useState<string>(vehicle.productionControl?.avariasCarregamentoPhoto || '');
   const [activeLightboxPhoto, setActiveLightboxPhoto] = useState<string | null>(null);
 
+  const [cameraActivePhase, setCameraActivePhase] = useState<'desc' | 'carreg' | null>(null);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+  const videoRef = React.useRef<HTMLVideoElement | null>(null);
+
+  const startCamera = async (phase: 'desc' | 'carreg') => {
+    setCameraError(null);
+    setCameraActivePhase(phase);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' },
+        audio: false
+      });
+      setCameraStream(stream);
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
+      }, 150);
+    } catch (err: any) {
+      console.error('Error accessing camera:', err);
+      setCameraError('Permissão da câmera negada ou dispositivo indisponível. Verifique as configurações de câmera.');
+    }
+  };
+
+  const stopCamera = () => {
+    if (cameraStream) {
+      cameraStream.getTracks().forEach(track => track.stop());
+      setCameraStream(null);
+    }
+    setCameraActivePhase(null);
+    setCameraError(null);
+  };
+
+  const capturePhoto = (phase: 'desc' | 'carreg') => {
+    if (videoRef.current) {
+      const video = videoRef.current;
+      const canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.5);
+        compressAndResizeImage(dataUrl, (compressed) => {
+          if (phase === 'desc') {
+            const currentPhotos = avariasDescPhoto ? avariasDescPhoto.split('||').filter(Boolean) : [];
+            setAvariasDescPhoto([...currentPhotos, compressed].join('||'));
+          } else {
+            const currentPhotos = avariasCarregPhoto ? avariasCarregPhoto.split('||').filter(Boolean) : [];
+            setAvariasCarregPhoto([...currentPhotos, compressed].join('||'));
+          }
+        });
+        stopCamera();
+      }
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (cameraStream) {
+        cameraStream.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, [cameraStream]);
+
   // Notes
   const [observacoes, setObservacoes] = useState(vehicle.productionControl?.observacoes || '');
 
-  const handleBreakdownChange = (reason: 'venda' | 'vasilhame_cliente' | 'falta' | 'outros' | 'comodato', val: number) => {
+  const handleBreakdownChange = (reason: 'venda' | 'vasilhame_cliente' | 'falta' | 'outros' | 'comodato' | 'troca_avarias', val: number) => {
     const cleanVal = isNaN(val) ? 0 : val;
     setDifferenceReasonsBreakdown(prev => {
       const exists = prev.some(item => item.reason === reason);
@@ -262,7 +542,8 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
       }
       const c = updated.find(b => b.reason === 'vasilhame_cliente')?.qty || 0;
       const com = updated.find(b => b.reason === 'comodato')?.qty || 0;
-      const liveDiffQty = expectedDischarge > 0 ? (expectedDischarge + c + com) - totalUnloaded : 0;
+      const troca = updated.find(b => b.reason === 'troca_avarias')?.qty || 0;
+      const liveDiffQty = expectedDischarge > 0 ? (expectedDischarge + troca + c + com) - totalUnloaded : 0;
       const totalFalta = Math.max(0, liveDiffQty);
       return updated.map(item => item.reason === 'falta' ? { ...item, qty: totalFalta } : item);
     });
@@ -280,6 +561,23 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
       });
     }
   }, [diffQty]);
+
+  // Sync "troca avaria/água" inside avariasDesc with troca_qty
+  useEffect(() => {
+    setAvariasDesc(prev => {
+      const exists = prev.some(item => isTrocaAvariaType(item.type));
+      if (exists) {
+        return prev.map(item => {
+          if (isTrocaAvariaType(item.type)) {
+            return { ...item, qty: troca_qty };
+          }
+          return item;
+        });
+      } else {
+        return [...prev, { type: 'troca avaria/água', qty: troca_qty }];
+      }
+    });
+  }, [troca_qty]);
 
   // Add new damage type state
   const [newDamageType, setNewDamageType] = useState('');
@@ -313,19 +611,31 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
       setDescarregadoQty(liveVehicle.productionControl.descarregadoQty || 0);
       setRetornoVasilhameCheio(liveVehicle.productionControl.retornoVasilhameCheio || 0);
       setRetiradaVasilhameCarga(liveVehicle.productionControl.retiradaVasilhameCarga || 0);
+      setVasilhamesRetornadosLavagem(liveVehicle.productionControl.vasilhamesRetornadosLavagem || 0);
+      setCleanCargo(liveVehicle.productionControl.cleanCargo || false);
       setObservacoes(liveVehicle.productionControl.observacoes || '');
+
+      const salesForSync = getTripSalesHelper(liveVehicle, movements);
+      const tTroca = salesForSync
+        .filter((s: any) => s.productType === 'troca' || (s.item && s.item.toLowerCase().includes('troca')))
+        .reduce((sum: number, s: any) => sum + (s.exchangeAvariasQty || s.qty || 0), 0);
+
       if (liveVehicle.productionControl.differenceReasonsBreakdown) {
         const loaded = liveVehicle.productionControl.differenceReasonsBreakdown;
         const defaults: DifferenceReasonBreakdown[] = [
           { reason: 'venda', qty: 0 },
           { reason: 'vasilhame_cliente', qty: 0 },
           { reason: 'comodato', qty: 0 },
+          { reason: 'troca_avarias', qty: tTroca },
           { reason: 'falta', qty: 0 },
           { reason: 'outros', qty: 0 }
         ];
         // Merge so any missing reason gets added
         const merged = defaults.map(d => {
           const found = loaded.find(l => l.reason === d.reason);
+          if (d.reason === 'troca_avarias') {
+            return found ? found : { ...d, qty: tTroca };
+          }
           return found ? found : d;
         });
         setDifferenceReasonsBreakdown(merged);
@@ -334,6 +644,7 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
           { reason: 'venda', qty: 0 },
           { reason: 'vasilhame_cliente', qty: 0 },
           { reason: 'comodato', qty: 0 },
+          { reason: 'troca_avarias', qty: tTroca },
           { reason: 'falta', qty: 0 },
           { reason: 'outros', qty: 0 }
         ] as DifferenceReasonBreakdown[]);
@@ -341,15 +652,32 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
       if (liveVehicle.productionControl.descarregadoFormula) {
         setNumbers(
           liveVehicle.productionControl.descarregadoFormula
-            .split('+')
-            .map(p => parseInt(p, 10))
-            .filter(n => !isNaN(n) && n > 0)
-        );
+             .split('+')
+             .map(p => parseInt(p, 10))
+             .filter(n => !isNaN(n) && n > 0)
+          );
       } else {
         setNumbers([]);
       }
       if (liveVehicle.productionControl.avariasDescarregamento) {
-        setAvariasDesc(deduplicateAvarias(liveVehicle.productionControl.avariasDescarregamento));
+        let list = liveVehicle.productionControl.avariasDescarregamento;
+        const hasTroca = list.some(item => isTrocaAvariaType(item.type));
+        if (!hasTroca) {
+          list = [...list, { type: 'troca avaria/água', qty: tTroca }];
+        } else {
+          list = list.map(item => {
+            if (isTrocaAvariaType(item.type)) {
+              const savedItem = (liveVehicle.productionControl?.avariasDescarregamento || []).find(it => isTrocaAvariaType(it.type));
+              return { ...item, qty: savedItem ? savedItem.qty : tTroca };
+            }
+            return item;
+          });
+        }
+        
+        // Clean up legacy
+        list = list.filter(item => (item?.type || '').toLowerCase().trim() !== 'vasilhame avaria troca');
+
+        setAvariasDesc(deduplicateAvarias(list));
       }
       if (liveVehicle.productionControl.avariasDescarregamentoPhoto) {
         setAvariasDescPhoto(liveVehicle.productionControl.avariasDescarregamentoPhoto);
@@ -361,7 +689,7 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
         setAvariasCarregPhoto(liveVehicle.productionControl.avariasCarregamentoPhoto);
       }
     }
-  }, [liveVehicle.id, liveVehicle.kanbanStep]);
+  }, [liveVehicle.id, liveVehicle.kanbanStep, totalTrocaVasilhames]);
 
   // Load custom avaria types safely using atomic updates to prevent duplicate keys
   useEffect(() => {
@@ -374,6 +702,13 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
       cleaned = cleaned.filter(a => {
         if (a.qty > 0) return true; // keep if there's active data
         const aClean = cleanOccurrenceTypeName(a.type).toLowerCase().trim();
+        
+        // NEVER filter out standard built-in types
+        const isStandard = [
+          'vencido', 'cheiro', 'lodo', 'quebrado', 'vasilhame de rota'
+        ].includes(aClean) || isTrocaAvariaType(a.type);
+        if (isStandard) return true;
+
         return customAvariaTypes.some(entry => 
           cleanOccurrenceTypeName(entry.type).toLowerCase().trim() === aClean &&
           (entry.classification === 'descarregamento' || entry.classification === 'ambos')
@@ -398,6 +733,21 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
       cleaned = cleaned.filter(c => {
         if (c.qty > 0) return true; // keep if there's active data
         const cClean = cleanOccurrenceTypeName(c.type).toLowerCase().trim();
+
+        // Items that must NOT appear in carregamento (unload only)
+        const isDescOnly = [
+          'microfuro', 'vencido do mês (seco)', 'vencido do mes (seco)', 'vencido (cheio)', 'quebrado lacrado',
+          'troca avaria/água', 'vencido (carregamento)'
+        ].includes(cClean);
+        if (isDescOnly) return false;
+
+        // Standard built-in types for CARREGAMENTO
+        const isStandard = [
+          'vencido', 'cheiro', 'lodo', 'quebrado', 'ressecado', 'quebra na maquina', 'quebra carregamento',
+          'corpo estranho', 'mal lavado', 'vasilhame de rota'
+        ].includes(cClean);
+        if (isStandard) return true;
+
         return customAvariaTypes.some(entry => 
           cleanOccurrenceTypeName(entry.type).toLowerCase().trim() === cClean &&
           (entry.classification === 'carregamento' || entry.classification === 'ambos')
@@ -472,14 +822,28 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
     const list = phase === 'desc' ? avariasDesc : avariasCarreg;
     const setList = phase === 'desc' ? setAvariasDesc : setAvariasCarreg;
 
-    setList(
-      list.map(item => {
-        if (item.type === type) {
-          return { ...item, qty: Math.max(0, item.qty + change) };
-        }
-        return item;
-      })
-    );
+    if (phase === 'desc' && isTrocaAvariaType(type)) {
+      const item = avariasDesc.find(i => isTrocaAvariaType(i.type));
+      const newQty = item ? Math.max(0, item.qty + change) : Math.max(0, change);
+      handleBreakdownChange('troca_avarias', newQty);
+    }
+
+    const updatedList = list.map(item => {
+      if (item.type === type) {
+        return { ...item, qty: Math.max(0, item.qty + change) };
+      }
+      return item;
+    });
+
+    setList(updatedList);
+
+    // If adjusting a rewash type (corpo estranho, mal lavado, etc.) in carregamento, update vasilhamesRetornadosLavagem
+    if (phase === 'carreg' && isRewashType(type, customAvariaTypes)) {
+      const totalRewash = updatedList
+        .filter(c => isRewashType(c.type, customAvariaTypes))
+        .reduce((sum, c) => sum + (c.qty || 0), 0);
+      setVasilhamesRetornadosLavagem(totalRewash);
+    }
   };
 
   const setAvariaQtyDirectly = (type: string, value: number, phase: 'desc' | 'carreg') => {
@@ -488,14 +852,26 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
     const setList = phase === 'desc' ? setAvariasDesc : setAvariasCarreg;
     const cleanVal = isNaN(value) ? 0 : Math.max(0, value);
 
-    setList(
-      list.map(item => {
-        if (item.type === type) {
-          return { ...item, qty: cleanVal };
-        }
-        return item;
-      })
-    );
+    if (phase === 'desc' && isTrocaAvariaType(type)) {
+      handleBreakdownChange('troca_avarias', cleanVal);
+    }
+
+    const updatedList = list.map(item => {
+      if (item.type === type) {
+        return { ...item, qty: cleanVal };
+      }
+      return item;
+    });
+
+    setList(updatedList);
+
+    // If adjusting a rewash type (corpo estranho, mal lavado, etc.) in carregamento, update vasilhamesRetornadosLavagem
+    if (phase === 'carreg' && isRewashType(type, customAvariaTypes)) {
+      const totalRewash = updatedList
+        .filter(c => isRewashType(c.type, customAvariaTypes))
+        .reduce((sum, c) => sum + (c.qty || 0), 0);
+      setVasilhamesRetornadosLavagem(totalRewash);
+    }
   };
 
   const handleAddNewAvariaType = () => {
@@ -518,10 +894,19 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
     } else {
       setAvariasCarreg(prev => {
         const cleaned = deduplicateAvarias(prev);
+        let updated: AvariaEntry[];
         if (!cleaned.some(c => c.type.toLowerCase().trim() === name.toLowerCase())) {
-          return [...cleaned, { type: name, qty: 1 }];
+          updated = [...cleaned, { type: name, qty: 1 }];
+        } else {
+          updated = cleaned.map(c => c.type.toLowerCase().trim() === name.toLowerCase() ? { ...c, qty: c.qty + 1 } : c);
         }
-        return cleaned.map(c => c.type.toLowerCase().trim() === name.toLowerCase() ? { ...c, qty: c.qty + 1 } : c);
+        if (isRewashType(name, customAvariaTypes)) {
+          const totalRewash = updated
+            .filter(c => isRewashType(c.type, customAvariaTypes))
+            .reduce((sum, c) => sum + (c.qty || 0), 0);
+          setVasilhamesRetornadosLavagem(totalRewash);
+        }
+        return updated;
       });
     }
 
@@ -589,11 +974,11 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
   const getTotals = () => {
     // Quebra na maquina quantity
     const quebraNaMaquinaQty = [...avariasDesc, ...avariasCarreg]
-      .filter(x => cleanOccurrenceTypeName(x.type).toLowerCase().trim() === 'quebra na maquina')
-      .reduce((sum, item) => sum + item.qty, 0);
+      .filter(x => (cleanOccurrenceTypeName(x?.type) || '').toLowerCase().trim() === 'quebra na maquina')
+      .reduce((sum, item) => sum + (item.qty || 0), 0);
 
     const descLosses = avariasDesc
-      .filter(a => !isPurchaseType(a.type, customAvariaTypes))
+      .filter(a => !isPurchaseType(a.type, customAvariaTypes) && !isRewashType(a.type, customAvariaTypes))
       .reduce((sum, item) => sum + item.qty, 0);
 
     const descPurchases = avariasDesc
@@ -601,7 +986,7 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
       .reduce((sum, item) => sum + item.qty, 0);
 
     const carregLosses = avariasCarreg
-      .filter(c => !isPurchaseType(c.type, customAvariaTypes))
+      .filter(c => !isPurchaseType(c.type, customAvariaTypes) && !isRewashType(c.type, customAvariaTypes))
       .reduce((sum, item) => sum + item.qty, 0);
 
     const carregPurchases = avariasCarreg
@@ -610,7 +995,7 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
 
     const totalCarregado = descarregadoQty - (isProprio ? (retiradaVasilhameCarga || 0) : 0) - descLosses - carregLosses + carregPurchases + descPurchases;
 
-    // Normal avarias = all losses minus quebraNaMaquinaQty
+    // Normal avarias = all genuine losses minus quebraNaMaquinaQty
     const normalAvariasQty = Math.max(0, (descLosses + carregLosses) - quebraNaMaquinaQty);
 
     // Group additions/purchases by product
@@ -668,40 +1053,67 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
       const requiredShortage = diffQty;
       
       if (requiredShortage < 0) {
-        setValidationError(`Você possui uma sobra de ${-requiredShortage} vasilhame(s). Por favor, use "Trouxe Vasilhame de Cliente" ou "Retorno de Comodato" para justificar as sobras.`);
+        setValidationError(`Você possui uma sobra de ${-requiredShortage} vasilhame(s). Por favor, use "Trouxe Vasilhame de Cliente", "Retorno de Comodato" ou "Troca Avarias/Água" para justificar as sobras.`);
         return;
       }
     }
 
     setValidationError(null);
 
+    let logs = vehicle.productionControl?.unloadingEditLogs || [];
+    if (isUnloadingUnlocked && unlockReason) {
+      logs = [...logs, {
+        id: crypto.randomUUID?.() || Date.now().toString(),
+        reason: unlockReason,
+        timestamp: new Date().toISOString(),
+        editedBy: currentUser?.name || 'Sistema'
+      }];
+    }
+
+    let finalAvariasDesc = [...avariasDesc];
+    const hasTroca = finalAvariasDesc.some(item => isTrocaAvariaType(item.type));
+    if (!hasTroca) {
+      finalAvariasDesc.push({ type: 'troca avaria/água', qty: troca_qty });
+    } else {
+      finalAvariasDesc = finalAvariasDesc.map(item => {
+        if (isTrocaAvariaType(item.type)) {
+          return { ...item, qty: troca_qty };
+        }
+        return item;
+      });
+    }
+    // Clean up legacy
+    finalAvariasDesc = finalAvariasDesc.filter(item => (item?.type || '').toLowerCase().trim() !== 'vasilhame avaria troca');
+
     const control: ProductionControl = {
       descarregadoFormula: formula,
       descarregadoQty,
       retornoVasilhameCheio: effectiveRetornoCheio,
       retiradaVasilhameCarga: isProprio ? retiradaVasilhameCarga : undefined,
-      avariasDescarregamento: avariasDesc,
+      vasilhamesRetornadosLavagem,
+      avariasDescarregamento: finalAvariasDesc,
       avariasDescarregamentoPhoto: avariasDescPhoto,
       avariasCarregamento: avariasCarreg,
       avariasCarregamentoPhoto: avariasCarregPhoto,
       observacoes,
       totalCarregado,
-      expectedDischargeQty: vehicle.ownerType === 'proprio' ? expectedDischarge : undefined,
+      expectedDischargeQty: vehicle.ownerType === 'proprio' ? (expectedDischarge + (differenceReasonsBreakdown.find(b => b.reason === 'troca_avarias')?.qty || 0)) : undefined,
       differenceQty: vehicle.ownerType === 'proprio' ? diffQty : undefined,
       differenceReason: undefined,
       differenceReasonsBreakdown: vehicle.ownerType === 'proprio' && expectedDischarge > 0 ? differenceReasonsBreakdown : undefined,
-      stockRequests: vehicle.productionControl?.stockRequests
+      stockRequests: vehicle.productionControl?.stockRequests,
+      unloadingEditLogs: logs,
+      cleanCargo: !isProprio ? cleanCargo : undefined
     };
 
-    updateMovementDetails(vehicle.id, { productionControl: control });
-    
     if (isConclude && transitionOnSave) {
-      updateKanbanStep(vehicle.id, transitionOnSave);
+      updateMovementDetails(vehicle.id, { productionControl: control }, transitionOnSave);
       setIsSaved(true);
       setShowPrintSlip(true);
       return;
     }
 
+    updateMovementDetails(vehicle.id, { productionControl: control });
     onClose();
   };
 
@@ -795,7 +1207,7 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                 <div className="flex flex-col items-center justify-center gap-1.5 mb-2">
                   {companyLogo ? (
                     <img 
-                      src={companyLogo} 
+                      src={companyLogo || undefined} 
                       alt="Logo Empresa" 
                       className="max-h-12 max-w-[150px] object-contain mb-1"
                       referrerPolicy="no-referrer"
@@ -870,6 +1282,7 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                         const o = differenceReasonsBreakdown.find(b => b.reason === 'outros')?.qty || 0;
                         const c = differenceReasonsBreakdown.find(b => b.reason === 'vasilhame_cliente')?.qty || 0;
                         const com = differenceReasonsBreakdown.find(b => b.reason === 'comodato')?.qty || 0;
+                        const t = differenceReasonsBreakdown.find(b => b.reason === 'troca_avarias')?.qty || 0;
                         return (
                           <div className="pt-2 mt-2 border-t border-dotted border-slate-200 space-y-0.5 text-[11px] text-slate-600">
                             {c > 0 && (
@@ -888,6 +1301,12 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                               <div className="flex justify-between">
                                 <span>- Comodato:</span>
                                 <span className="font-semibold">{com} un</span>
+                              </div>
+                            )}
+                            {t > 0 && (
+                              <div className="flex justify-between text-blue-600">
+                                <span>- Troca Avarias/Água:</span>
+                                <span className="font-semibold">+{t} un</span>
                               </div>
                             )}
                             {f > 0 && (
@@ -916,6 +1335,11 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                         <div className="flex justify-between font-bold text-amber-700 mt-0.5">
                           <span>Vasilhames Cheios Retornados:</span>
                           <span>{effectiveRetornoCheio} un</span>
+                        </div>
+                      )}
+                      {cleanCargo && (
+                        <div className="text-[10px] font-black text-emerald-700 uppercase mt-2 flex items-center gap-1 bg-emerald-50 px-2 py-1 rounded border border-emerald-100/60 font-sans tracking-wide">
+                          ✨ CARGA LIMPA (DESCONTO NO CAIXA)
                         </div>
                       )}
                     </>
@@ -957,10 +1381,10 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                   <>
                     <div className="border-t border-dashed border-slate-200 pt-3">
                       <div className="text-[9px] uppercase font-black text-slate-400 mb-1">2. Registro de Saída / Envase</div>
-                      {avariasCarreg.some(c => !isPurchaseType(c.type, customAvariaTypes) && c.qty > 0) && (
+                      {avariasCarreg.some(c => !isPurchaseType(c.type, customAvariaTypes) && !isRewashType(c.type, customAvariaTypes) && c.qty > 0) && (
                         <div className="mb-2 pl-2 border-l-2 border-amber-200">
                           <div className="text-[10px] font-bold text-amber-650 mb-0.5">Avarias Carregamento / Envase:</div>
-                          {avariasCarreg.filter(c => !isPurchaseType(c.type, customAvariaTypes) && c.qty > 0).map((c, idx) => (
+                          {avariasCarreg.filter(c => !isPurchaseType(c.type, customAvariaTypes) && !isRewashType(c.type, customAvariaTypes) && c.qty > 0).map((c, idx) => (
                             <div key={`${c.type}-${idx}`} className="flex justify-between text-[10px] text-slate-500 capitalize">
                               <span>- {c.type}:</span>
                               <span>{c.qty} un</span>
@@ -968,6 +1392,42 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                           ))}
                         </div>
                       )}
+
+                      {avariasCarreg.some(c => isRewashType(c.type, customAvariaTypes) && c.qty > 0) && (
+                        <div className="mb-2 pl-2 border-l-2 border-blue-200">
+                          <div className="text-[10px] font-bold text-blue-600 mb-0.5">Retorno para Lavagem / Vistoria (Não Desconta Carga):</div>
+                          {avariasCarreg.filter(c => isRewashType(c.type, customAvariaTypes) && c.qty > 0).map((c, idx) => (
+                            <div key={`${c.type}-${idx}`} className="flex justify-between text-[10px] text-slate-500 capitalize">
+                              <span>- {c.type}:</span>
+                              <span>{c.qty} un</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {(() => {
+                        let totalErros = 0;
+                        avariasCarreg.forEach(c => {
+                          const name = c.type.toLowerCase().trim();
+                          if (name.includes('corpo estranho') || name.includes('mal lavado') || name.includes('vencido')) {
+                            totalErros += c.qty;
+                          }
+                        });
+                        if (totalErros > 0 || totalCarregado > 0) {
+                          const base = totalCarregado + totalErros;
+                          const pct = base > 0 ? (totalErros / base) * 100 : 0;
+                          return (
+                            <div className="mb-2 pl-2 border-l-2 border-slate-300">
+                              <div className="text-[10px] font-bold text-slate-700 mb-0.5">Qualidade da Vistoria:</div>
+                              <div className="flex justify-between text-[10px] text-slate-500">
+                                <span>Taxa de Erros Detectados:</span>
+                                <span className="font-bold">{pct.toFixed(1)}% ({totalErros} un)</span>
+                              </div>
+                            </div>
+                          );
+                        }
+                        return null;
+                      })()}
                       
                       {avariasCarreg.some(c => isPurchaseType(c.type, customAvariaTypes) && c.qty > 0) && (
                         <div className="mb-2 pl-2 border-l-2 border-emerald-200">
@@ -1026,6 +1486,22 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                         <span>Produção / Carga Nova:</span>
                         <span className="text-indigo-600 font-extrabold text-xs">{totalCarregado || 0} un</span>
                       </div>
+                      {liveVehicle.ownerType === 'proprio' && (() => {
+                        const matching = (driverTripLoads || []).filter(t => t.gateMovementId === liveVehicle.id || (!t.gateMovementId && t.driverName?.toLowerCase() === liveVehicle.driver?.toLowerCase() && t.vehiclePlate?.toLowerCase() === liveVehicle.plate?.toLowerCase() && new Date(t.timestamp).getTime() >= new Date(liveVehicle.timestamp).getTime() - 120000 && new Date(t.timestamp).getTime() <= new Date(liveVehicle.timestamp).getTime() + 86400000));
+                        const grouped = matching.reduce((acc, load) => {
+                          const cleanName = load.productName.split('(')[0].trim();
+                          const key = load.productId || cleanName.toLowerCase();
+                          if (!acc[key]) acc[key] = { id: key, productName: cleanName, initialQty: 0 };
+                          acc[key].initialQty += (load.initialQty || 0);
+                          return acc;
+                        }, {} as Record<string, { id: string; productName: string; initialQty: number }>);
+                        return Object.values(grouped).map(load => (
+                          <div key={load.id} className="flex justify-between text-xs font-bold text-indigo-700 mt-0.5 uppercase">
+                            <span>(+) {load.productName}:</span>
+                            <span className="font-extrabold text-xs">+{load.initialQty} un</span>
+                          </div>
+                        ));
+                      })()}
                       {effectiveRetornoCheio > 0 && (
                         <>
                           <div className="flex justify-between text-xs font-bold text-slate-700 mt-0.5 uppercase">
@@ -1278,10 +1754,12 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                           const val = cEntry ? cEntry.qty : 0;
                           const comEntry = differenceReasonsBreakdown.find(b => b.reason === 'comodato');
                           const valCom = comEntry ? comEntry.qty : 0;
+                          const trocaEntry = differenceReasonsBreakdown.find(b => b.reason === 'troca_avarias');
+                          const valTroca = trocaEntry ? trocaEntry.qty : 0;
                           const totalFaltaCarga = Math.max(0, diffQty);
                           return (
                             <>
-                              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-1 xl:grid-cols-2 gap-4">
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                                 <div className="bg-blue-50/50 p-3 rounded-lg border border-blue-100 flex flex-col gap-2">
                                   <div>
                                     <label className="text-[10px] font-bold text-blue-900 uppercase block tracking-tight">
@@ -1363,6 +1841,47 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                                     </div>
                                   </div>
                                 </div>
+
+                                <div className="bg-amber-50/50 p-3 rounded-lg border border-amber-150 flex flex-col gap-2">
+                                  <div>
+                                    <label className="text-[10px] font-bold text-amber-950 uppercase block tracking-tight">
+                                      Troca Avarias/Água?
+                                    </label>
+                                    <span className="text-[9px] text-amber-800 leading-tight block mt-0.5">
+                                      Lançado pelo motorista em minha viagem (avarias não descontadas).
+                                    </span>
+                                  </div>
+                                  <div className="flex justify-between items-center mt-1">
+                                    <span className="text-xs text-amber-950 font-bold">Quantidade:</span>
+                                    <div className="flex items-center gap-1.5">
+                                      <button 
+                                        type="button"
+                                        onClick={() => isStage1Editable && handleBreakdownChange('troca_avarias', Math.max(0, valTroca - 1))}
+                                        disabled={!isStage1Editable}
+                                        className="w-7 h-7 rounded bg-amber-100 hover:bg-amber-200 text-amber-800 font-black flex items-center justify-center transition-colors disabled:opacity-50"
+                                      >
+                                        -
+                                      </button>
+                                      <input
+                                        type="number"
+                                        min="0"
+                                        disabled={!isStage1Editable}
+                                        value={valTroca || ''}
+                                        onChange={e => handleBreakdownChange('troca_avarias', parseInt(e.target.value, 10))}
+                                        className="w-14 border rounded text-xs text-center font-mono font-bold focus:ring-2 focus:ring-amber-500 focus:outline-none bg-white border-amber-200 py-1"
+                                        placeholder="0"
+                                      />
+                                      <button 
+                                        type="button"
+                                        onClick={() => isStage1Editable && handleBreakdownChange('troca_avarias', valTroca + 1)}
+                                        disabled={!isStage1Editable}
+                                        className="w-7 h-7 rounded bg-amber-100 hover:bg-amber-200 text-amber-800 font-black flex items-center justify-center transition-colors disabled:opacity-50"
+                                      >
+                                        +
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
                               </div>
 
                               <div className="bg-amber-50/50 p-3 rounded-lg border border-amber-100 text-xs text-amber-900 font-semibold">
@@ -1393,7 +1912,7 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                       {(() => {
                         const c = differenceReasonsBreakdown.find(b => b.reason === 'vasilhame_cliente')?.qty || 0;
                         const com = differenceReasonsBreakdown.find(b => b.reason === 'comodato')?.qty || 0;
-                        const totalExpectedDischarge = expectedDischarge + c + com;
+                        const totalExpectedDischarge = expectedDischarge + troca_qty + c + com;
                         const totalPhysicalUnloaded = descarregadoQty + effectiveRetornoCheio;
                         const requiredShortage = totalExpectedDischarge - totalPhysicalUnloaded;
                         const isOk = requiredShortage >= 0;
@@ -1406,6 +1925,12 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                                 <span>Deveria ter (Saída):</span>
                                 <span className="font-bold">{expectedDischarge} un</span>
                               </div>
+                              {troca_qty > 0 && (
+                                <div className="flex justify-between text-blue-600">
+                                  <span>(+) Troca Avarias/Água:</span>
+                                  <span className="font-bold">+{troca_qty} un</span>
+                                </div>
+                              )}
                               <div className="flex justify-between text-indigo-700">
                                 <span>(+) Vasilhames de Cliente:</span>
                                 <span className="font-bold">+{c} un</span>
@@ -1523,8 +2048,32 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                       <span className="w-2.5 h-2.5 rounded-full bg-indigo-500 animate-pulse" />
                       1. Descarregamento (Entrada)
                     </span>
-                    <span className="text-[10px] text-slate-400 font-medium font-mono">Contagem de Vasilhames</span>
+                    <div className="flex items-center gap-2">
+                      {!isConcluded && (currentStep === 'aguardando_carregamento' || currentStep === 'carregamento') && !isUnloadingUnlocked && !isReadOnly && (
+                        <button
+                          onClick={(e) => { e.preventDefault(); setShowUnlockModal(true); }}
+                          className="px-2 py-1 bg-amber-50 text-amber-700 border border-amber-200 rounded text-[9px] font-bold uppercase hover:bg-amber-100 transition-colors"
+                        >
+                          🔓 Habilitar Edição
+                        </button>
+                      )}
+                      <span className="text-[10px] text-slate-400 font-medium font-mono">Contagem de Vasilhames</span>
+                    </div>
                   </div>
+
+                  {vehicle.productionControl?.unloadingEditLogs && vehicle.productionControl.unloadingEditLogs.length > 0 && (
+                    <div className="bg-amber-50/50 border border-amber-100 rounded-md p-2">
+                      <p className="text-[9px] font-bold text-amber-800 uppercase mb-1">Histórico de Alterações</p>
+                      <div className="space-y-1">
+                        {vehicle.productionControl.unloadingEditLogs.map(log => (
+                          <div key={log.id} className="text-[10px] text-amber-900/80 bg-white/60 p-1.5 rounded flex flex-col gap-0.5">
+                            <span className="font-semibold">{log.editedBy} - {new Date(log.timestamp).toLocaleString()}</span>
+                            <span className="italic">Motivo: {log.reason}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Keyboard friendly Adder (Enter triggers saves) */}
                   <div className="space-y-2">
@@ -1645,6 +2194,29 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                     </div>
                   )}
 
+                  {!isProprio && (
+                    <div className="flex flex-col gap-3">
+                      <div className="bg-emerald-50 border border-emerald-100 p-3 rounded-lg flex items-center gap-2.5">
+                        <input
+                          type="checkbox"
+                          id="cleanCargoUnload"
+                          checked={cleanCargo}
+                          disabled={!isStage1Editable}
+                          onChange={e => setCleanCargo(e.target.checked)}
+                          className="w-4.5 h-4.5 text-emerald-600 border-slate-300 rounded focus:ring-emerald-500 cursor-pointer disabled:opacity-50"
+                        />
+                        <div className="cursor-pointer select-none flex-1" onClick={() => isStage1Editable && setCleanCargo(!cleanCargo)}>
+                          <label htmlFor="cleanCargoUnload" className="block text-xs font-bold text-slate-800 cursor-pointer">
+                            ✨ Carga Limpa (Dará desconto para o cliente no caixa)
+                          </label>
+                          <span className="block text-[10px] text-emerald-700/80 font-medium mt-0.5">
+                            Indica que este descarregamento é uma carga limpa e receberá o respectivo desconto no acerto do caixa.
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Damages at descarregamento */}
                   <div className="space-y-2">
                     <span className="block text-[10px] font-bold text-slate-500 uppercase tracking-wide">
@@ -1660,6 +2232,10 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                               {isPurchaseType(a.type, customAvariaTypes) ? (
                                 <span className="text-emerald-600 font-black text-[10px] bg-emerald-50 px-1 py-0.2 rounded uppercase border border-emerald-100 flex items-center gap-0.5">
                                   ➕ Adição de Carga
+                                </span>
+                              ) : isRewashType(a.type, customAvariaTypes) ? (
+                                <span className="text-blue-600 font-bold text-[10px] bg-blue-50 px-1 py-0.2 rounded uppercase border border-blue-100 flex items-center gap-0.5">
+                                  🔄 Retorno p/ Lavar
                                 </span>
                               ) : (
                                 <span className="text-red-500 font-bold text-[10px] bg-red-50 px-1 py-0.2 rounded uppercase border border-red-100">
@@ -1716,19 +2292,76 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                       Registro Fotográfico (Avarias Descarregamento)
                     </span>
                     
+                    {cameraActivePhase === 'desc' && (
+                      <div className="space-y-3 mt-2 bg-slate-900 p-3 rounded-lg">
+                        {cameraError ? (
+                          <div className="text-red-400 text-xs text-left">
+                            <p className="font-bold">Acesso à câmera falhou:</p>
+                            <p className="text-slate-300">{cameraError}</p>
+                            <button
+                              type="button"
+                              onClick={stopCamera}
+                              className="mt-1 text-blue-400 font-bold text-[10px] uppercase tracking-wider underline cursor-pointer"
+                            >
+                              Voltar
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="relative border border-slate-700 rounded-lg overflow-hidden bg-black max-w-sm mx-auto shadow-inner">
+                            <video
+                              ref={videoRef}
+                              autoPlay
+                              playsInline
+                              muted
+                              className="w-full h-56 object-cover bg-black"
+                            />
+                            <div className="absolute bottom-3 left-0 right-0 flex justify-center gap-2">
+                              <button
+                                type="button"
+                                onClick={stopCamera}
+                                className="bg-slate-900/95 hover:bg-slate-950 text-white border border-slate-750 font-bold text-[9px] uppercase tracking-wider px-3.5 py-2 rounded shadow-sm cursor-pointer"
+                              >
+                                Cancelar
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => capturePhoto('desc')}
+                                className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[9px] uppercase tracking-wider px-4 py-2 rounded flex items-center gap-1 shadow-sm cursor-pointer"
+                              >
+                                <Camera size={12} /> Capturar Foto
+                              </button>
+                            </div>
+                            <div className="absolute top-2 left-2 bg-black/60 rounded px-1.5 py-0.5 text-white font-mono text-[8px] tracking-widest uppercase">
+                              CÂMERA ATIVA
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     <div className="flex flex-wrap items-center gap-3">
-                      {isStage1Editable && (
-                        <label className="cursor-pointer shrink-0 bg-blue-50 hover:bg-blue-100 border border-blue-200 hover:border-blue-300 text-blue-700 font-bold text-[10px] uppercase tracking-wider px-3 py-2 rounded-lg flex items-center gap-1.5 transition-colors">
-                          <Camera size={14} />
-                          Adicionar Foto
-                          <input
-                            type="file"
-                            accept="image/*"
-                            capture="environment"
-                            onChange={e => handlePhotoUpload(e, 'desc')}
-                            className="hidden"
-                          />
-                        </label>
+                      {isStage1Editable && cameraActivePhase !== 'desc' && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => startCamera('desc')}
+                            className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-[10px] uppercase tracking-wider px-3 py-2 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm"
+                          >
+                            <Camera size={14} />
+                            Tirar Foto
+                          </button>
+
+                          <label className="cursor-pointer shrink-0 bg-slate-100 hover:bg-slate-200 border border-slate-300 hover:border-slate-400 text-slate-700 font-bold text-[10px] uppercase tracking-wider px-3 py-2 rounded-lg flex items-center gap-1.5 transition-colors shadow-sm">
+                            <Upload size={14} />
+                            Galeria / Arquivo
+                            <input
+                              type="file"
+                              accept="image/*"
+                              onChange={e => handlePhotoUpload(e, 'desc')}
+                              className="hidden"
+                            />
+                          </label>
+                        </>
                       )}
                       
                       {avariasDescPhoto ? (
@@ -1736,7 +2369,7 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                           {avariasDescPhoto.split('||').filter(Boolean).map((photo, index) => (
                             <div key={index} className="relative w-14 h-14 rounded-lg border border-slate-200 overflow-hidden group">
                               <img 
-                                src={photo} 
+                                src={photo || undefined} 
                                 alt={`Discharge Damage ${index + 1}`} 
                                 className="w-full h-full object-cover cursor-pointer hover:scale-105 transition-transform" 
                                 referrerPolicy="no-referrer"
@@ -1760,7 +2393,7 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                           ))}
                         </div>
                       ) : (
-                        <span className="text-[10px] text-slate-400">Nenhuma foto adicionada</span>
+                        cameraActivePhase !== 'desc' && <span className="text-[10px] text-slate-400">Nenhuma foto adicionada</span>
                       )}
                     </div>
                   </div>
@@ -1798,6 +2431,10 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                               {isPurchaseType(c.type, customAvariaTypes) ? (
                                 <span className="text-emerald-600 font-black text-[10px] bg-emerald-50 px-1 py-0.2 rounded uppercase border border-emerald-100 flex items-center gap-0.5">
                                   ➕ Adição de Carga
+                                </span>
+                              ) : isRewashType(c.type, customAvariaTypes) ? (
+                                <span className="text-blue-600 font-bold text-[10px] bg-blue-50 px-1 py-0.2 rounded uppercase border border-blue-100 flex items-center gap-0.5">
+                                  🔄 Retorno p/ Lavar
                                 </span>
                               ) : (
                                 <span className="text-red-500 font-bold text-[10px] bg-red-50 px-1 py-0.2 rounded uppercase border border-red-100">
@@ -1848,25 +2485,148 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                     </div>
                   </div>
 
+                  {/* Controle de Vasilhames Retornados (Controle de Tampas) */}
+                  <div className="space-y-1.5 pt-2 border-t border-slate-100 bg-white p-1 rounded-lg">
+                    <span className="block text-[10px] font-bold text-slate-500 uppercase tracking-wide">
+                      Retorno para Lavagem (Controle de Tampas)
+                    </span>
+                    <p className="text-[9px] text-slate-400 font-medium leading-relaxed">
+                      Vasilhames do cliente/veículo que retornaram para nova lavagem durante o processo, utilizando uma tampa adicional. (Não afeta a produção nem o estoque final, apenas o consumo de tampas).
+                    </p>
+                    <div className="flex items-center gap-3 mt-1.5 bg-blue-50/50 p-2 border border-blue-100 rounded-lg">
+                      <label className="flex-1 text-xs font-bold text-blue-900 leading-tight">
+                        Qtd. Retornada p/ Lavar:
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        disabled={!isStage2Editable}
+                        value={vasilhamesRetornadosLavagem || ''}
+                        onChange={e => setVasilhamesRetornadosLavagem(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                        placeholder="0"
+                        className="w-20 text-center font-mono font-bold text-slate-800 text-sm bg-white border border-blue-300 rounded py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Indicador de Qualidade da Vistoria */}
+                  {(() => {
+                    let totalErrosVistoria = 0;
+                    avariasCarreg.forEach(c => {
+                      const name = c.type.toLowerCase().trim();
+                      if (name.includes('corpo estranho') || name.includes('mal lavado') || name.includes('vencido')) {
+                        totalErrosVistoria += c.qty;
+                      }
+                    });
+                    const baseTotal = totalCarregado + totalErrosVistoria;
+                    const taxaErro = baseTotal > 0 ? (totalErrosVistoria / baseTotal) * 100 : 0;
+                    
+                    if (totalErrosVistoria > 0 || totalCarregado > 0) {
+                      return (
+                        <div className="space-y-1.5 pt-2 border-t border-slate-100 bg-white p-2 rounded-lg border">
+                          <div className="flex items-center justify-between">
+                            <span className="block text-[10px] font-bold text-slate-500 uppercase tracking-wide">
+                              Qualidade da Vistoria (Carregamento)
+                            </span>
+                            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase ${taxaErro > 5 ? 'bg-red-100 text-red-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                              {taxaErro.toFixed(1)}% de Erros
+                            </span>
+                          </div>
+                          <p className="text-[9px] text-slate-400 font-medium leading-relaxed">
+                            Mede a taxa de vasilhames que passaram pela esteira com problemas (Corpo estranho, Mal lavado, Vencido).
+                          </p>
+                          <div className="flex gap-2 mt-2">
+                            <div className="flex-1 bg-slate-50 p-2 rounded border border-slate-100 text-center">
+                              <div className="text-[14px] font-black text-slate-700">{totalErrosVistoria}</div>
+                              <div className="text-[8px] uppercase font-bold text-slate-500">Erros Detectados</div>
+                            </div>
+                            <div className="flex-1 bg-slate-50 p-2 rounded border border-slate-100 text-center">
+                              <div className="text-[14px] font-black text-slate-700">{baseTotal}</div>
+                              <div className="text-[8px] uppercase font-bold text-slate-500">Total Avaliado</div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    }
+                    return null;
+                  })()}
+
                   {/* Photo component carregamento */}
                   <div className="space-y-1.5 pt-2 border-t border-slate-100 bg-white p-1 rounded-lg">
                     <span className="block text-[10px] font-bold text-slate-500 uppercase tracking-wide">
                       Registro Fotográfico (Ocorrências de Carregamento)
                     </span>
                     
+                    {cameraActivePhase === 'carreg' && (
+                      <div className="space-y-3 mt-2 bg-slate-900 p-3 rounded-lg">
+                        {cameraError ? (
+                          <div className="text-red-400 text-xs text-left">
+                            <p className="font-bold">Acesso à câmera falhou:</p>
+                            <p className="text-slate-300">{cameraError}</p>
+                            <button
+                              type="button"
+                              onClick={stopCamera}
+                              className="mt-1 text-blue-400 font-bold text-[10px] uppercase tracking-wider underline cursor-pointer"
+                            >
+                              Voltar
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="relative border border-slate-700 rounded-lg overflow-hidden bg-black max-w-sm mx-auto shadow-inner">
+                            <video
+                              ref={videoRef}
+                              autoPlay
+                              playsInline
+                              muted
+                              className="w-full h-56 object-cover bg-black"
+                            />
+                            <div className="absolute bottom-3 left-0 right-0 flex justify-center gap-2">
+                              <button
+                                type="button"
+                                onClick={stopCamera}
+                                className="bg-slate-900/95 hover:bg-slate-950 text-white border border-slate-750 font-bold text-[9px] uppercase tracking-wider px-3.5 py-2 rounded shadow-sm cursor-pointer"
+                              >
+                                Cancelar
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => capturePhoto('carreg')}
+                                className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[9px] uppercase tracking-wider px-4 py-2 rounded flex items-center gap-1 shadow-sm cursor-pointer"
+                              >
+                                <Camera size={12} /> Capturar Foto
+                              </button>
+                            </div>
+                            <div className="absolute top-2 left-2 bg-black/60 rounded px-1.5 py-0.5 text-white font-mono text-[8px] tracking-widest uppercase">
+                              CÂMERA ATIVA
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     <div className="flex flex-wrap items-center gap-3">
-                      {isStage2Editable && (
-                        <label className="cursor-pointer shrink-0 bg-blue-50 hover:bg-blue-100 border border-blue-200 hover:border-blue-300 text-blue-700 font-bold text-[10px] uppercase tracking-wider px-3 py-2 rounded-lg flex items-center gap-1.5 transition-colors">
-                          <Camera size={14} />
-                          Adicionar Foto
-                          <input
-                            type="file"
-                            accept="image/*"
-                            capture="environment"
-                            onChange={e => handlePhotoUpload(e, 'carreg')}
-                            className="hidden"
-                          />
-                        </label>
+                      {isStage2Editable && cameraActivePhase !== 'carreg' && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => startCamera('carreg')}
+                            className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-[10px] uppercase tracking-wider px-3 py-2 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm"
+                          >
+                            <Camera size={14} />
+                            Tirar Foto
+                          </button>
+
+                          <label className="cursor-pointer shrink-0 bg-slate-100 hover:bg-slate-200 border border-slate-300 hover:border-slate-400 text-slate-700 font-bold text-[10px] uppercase tracking-wider px-3 py-2 rounded-lg flex items-center gap-1.5 transition-colors shadow-sm">
+                            <Upload size={14} />
+                            Galeria / Arquivo
+                            <input
+                              type="file"
+                              accept="image/*"
+                              onChange={e => handlePhotoUpload(e, 'carreg')}
+                              className="hidden"
+                            />
+                          </label>
+                        </>
                       )}
                       
                       {avariasCarregPhoto ? (
@@ -1874,7 +2634,7 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                           {avariasCarregPhoto.split('||').filter(Boolean).map((photo, index) => (
                             <div key={index} className="relative w-14 h-14 rounded-lg border border-slate-200 overflow-hidden group">
                               <img 
-                                src={photo} 
+                                src={photo || undefined} 
                                 alt={`Loading Damage ${index + 1}`} 
                                 className="w-full h-full object-cover cursor-pointer hover:scale-105 transition-transform" 
                                 referrerPolicy="no-referrer"
@@ -1898,7 +2658,7 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
                           ))}
                         </div>
                       ) : (
-                        <span className="text-[10px] text-slate-400">Nenhuma foto adicionada</span>
+                        cameraActivePhase !== 'carreg' && <span className="text-[10px] text-slate-400">Nenhuma foto adicionada</span>
                       )}
                     </div>
                   </div>
@@ -2078,6 +2838,72 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
       </div>
 
       {/* Revert / Estorno Modal Overlay */}
+      {showUnlockModal && (
+        <div className="fixed inset-0 z-56 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+          <div className="bg-white border border-slate-200 rounded-xl shadow-2xl max-w-md w-full overflow-hidden animate-in zoom-in-95 duration-200 text-left">
+            <div className="bg-slate-50 px-4 py-3 border-b border-slate-200 flex justify-between items-center">
+              <span className="text-xs font-bold text-amber-700 uppercase tracking-wider flex items-center gap-2">
+                <AlertTriangle className="text-amber-500" size={16} /> Habilitar Edição do Descarregamento
+              </span>
+              <button 
+                onClick={() => { setShowUnlockModal(false); setUnlockReason(''); }} 
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="p-5">
+              <p className="text-xs text-slate-600 mb-3 leading-relaxed">
+                Você está prestes a habilitar a edição dos dados de descarregamento de um veículo que já iniciou o carregamento. <br/>
+                Para continuar, é <strong>obrigatório</strong> informar o motivo da alteração. Esta alteração ficará registrada no histórico.
+              </p>
+              
+              <div className="mb-4">
+                <label className="block text-[10px] font-extrabold text-slate-500 uppercase tracking-widest mb-1.5">
+                  Motivo da Alteração (Obrigatório) *
+                </label>
+                <textarea
+                  rows={3}
+                  value={unlockReason}
+                  onChange={(e) => setUnlockReason(e.target.value)}
+                  placeholder="Por favor, informe detalhadamente o motivo da alteração..."
+                  className="w-full text-xs p-2.5 bg-white border border-slate-300 rounded focus:border-amber-500 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+                <button 
+                  type="button"
+                  onClick={() => { setShowUnlockModal(false); setUnlockReason(''); }} 
+                  className="px-4 py-2 text-[10px] font-bold text-slate-500 hover:text-slate-700 uppercase tracking-widest"
+                >
+                  Cancelar
+                </button>
+                <button 
+                  type="button"
+                  onClick={() => {
+                    if (!unlockReason.trim()) {
+                      alert('O motivo é obrigatório.');
+                      return;
+                    }
+                    setIsUnloadingUnlocked(true);
+                    setShowUnlockModal(false);
+                  }}
+                  disabled={!unlockReason.trim()}
+                  className={`px-5 py-2 rounded text-[10px] font-bold uppercase tracking-widest shadow-sm transition-colors ${
+                    !unlockReason.trim()
+                      ? 'bg-slate-300 text-slate-500 cursor-not-allowed opacity-50'
+                      : 'bg-amber-600 hover:bg-amber-700 text-white cursor-pointer'
+                  }`}
+                >
+                  Confirmar e Habilitar
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showRevertModal && (
         <div className="fixed inset-0 z-56 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
           <div className="bg-white border border-slate-200 rounded-xl shadow-2xl max-w-md w-full overflow-hidden animate-in zoom-in-95 duration-200 text-left">
@@ -2190,7 +3016,7 @@ export const ProductionControlModal: React.FC<ProductionControlModalProps> = ({
           </div>
           <div className="max-w-full max-h-[85vh] flex items-center justify-center">
             <img 
-              src={activeLightboxPhoto} 
+              src={activeLightboxPhoto || undefined} 
               alt="Visualização Ampliada" 
               className="max-w-full max-h-[85vh] object-contain rounded border border-slate-800" 
               referrerPolicy="no-referrer"

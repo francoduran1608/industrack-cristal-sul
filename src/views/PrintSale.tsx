@@ -155,7 +155,7 @@ export const PrintSale: React.FC<{ saleNumber: string }> = ({ saleNumber }) => {
           <div className="mb-2">
             {companyLogo ? (
               <img 
-                src={companyLogo} 
+                src={companyLogo || undefined} 
                 alt="Logo" 
                 className="max-h-12 max-w-[140px] object-contain mx-auto"
                 referrerPolicy="no-referrer"
@@ -242,7 +242,7 @@ export const PrintSale: React.FC<{ saleNumber: string }> = ({ saleNumber }) => {
         <div className="text-center pt-2">
           {saleData.signature ? (
             <div className="flex flex-col items-center">
-              <img src={saleData.signature} alt="Assinatura" className="max-h-16 object-contain mb-1" />
+              <img src={saleData.signature || undefined} alt="Assinatura" className="max-h-16 object-contain mb-1" />
               <div className="border-t border-slate-400 w-4/5 mx-auto print:border-black"></div>
               <span className="text-[8px] uppercase mt-0.5 text-slate-500">Assinatura do Cliente</span>
             </div>

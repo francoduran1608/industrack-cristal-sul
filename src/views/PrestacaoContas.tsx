@@ -4,9 +4,19 @@ import {
   Receipt, Plus, Trash2, Check, X, AlertCircle, TrendingUp, Coins, 
   Upload, Calendar, DollarSign, Search, CheckCircle2, Info, ArrowRight,
   ShieldAlert, Landmark, FileSpreadsheet, Eye, Printer, Filter, Lock, FileText,
-  AlertTriangle, Smartphone, Truck
+  AlertTriangle, Smartphone, Truck, Edit
 } from 'lucide-react';
 import { DriverSettlement, SettlementSale, SettlementExpense, SettlementSuprimento, BankTransaction, Movement, ProductionControl } from '../types';
+
+const cleanItemDisplay = (itemStr: string, clientStr: string) => {
+  let prodDisplayName = itemStr;
+  if (clientStr && itemStr.startsWith(clientStr + ' - ')) {
+    prodDisplayName = itemStr.substring(clientStr.length + 3);
+  } else if (itemStr.includes(' - ')) {
+    prodDisplayName = itemStr.split(' - ').slice(1).join(' - ');
+  }
+  return prodDisplayName;
+};
 
 const isPurchaseType = (typeId: string, customTypes: any[]) => {
   const norm = typeId.toLowerCase();
@@ -15,10 +25,12 @@ const isPurchaseType = (typeId: string, customTypes: any[]) => {
   return norm.includes('compra') || norm.includes('rota') || norm.includes('adicion') || norm.includes('aquisi');
 };
 
-const isDriverDeductibleAvaria = (typeId: string, customTypes: any[]) => {
+const isDriverDeductibleAvaria = (typeId: any, customTypes: any[] = []) => {
+  if (!typeId || typeof typeId !== 'string') return false;
   const norm = typeId.toLowerCase().trim();
   
   // Explicitly ignore those that returned sealed or are non-driver deductible
+  if (norm.includes('troca')) return false;
   if (norm === 'microfuro' || norm.includes('microfuro')) return false;
   if (norm.includes('vencido (cheio)') || norm.includes('vencido cheio')) return false;
   if (norm.includes('quebrado lacrado') || norm.includes('quebradolac')) return false;
@@ -29,13 +41,13 @@ const isDriverDeductibleAvaria = (typeId: string, customTypes: any[]) => {
     norm.includes('vencido do mes seco')
   ) return false;
   
-  const matched = customTypes.find(c => c.id === typeId || c.type.toLowerCase().trim() === norm);
+  const matched = (customTypes || []).find(c => c.id === typeId || (c?.type || '').toLowerCase().trim() === norm);
   
   if (matched) {
     if (matched.category === 'compra') return false;
     if (matched.origin === 'cliente') return false;
     
-    const mType = matched.type.toLowerCase().trim();
+    const mType = (matched.type || '').toLowerCase().trim();
     if (
       mType.includes('vencido do mês (seco)') || 
       mType.includes('vencido do mes (seco)') || 
@@ -58,6 +70,11 @@ const isDriverDeductibleAvaria = (typeId: string, customTypes: any[]) => {
   
   // Default fallback to only count specified ones (excluding vencido do mês seco due to early check)
   return norm.includes('vencido') || norm.includes('cheiro') || norm.includes('lodo') || norm.includes('quebrado');
+};
+
+export const isDisposableProduct = (itemStr: string) => {
+  const l = (itemStr || '').toLowerCase();
+  return l.includes('copo') || l.includes('200ml') || l.includes('cx c/ 48') || l.includes('510ml') || l.includes('1,5') || l.includes('1.5');
 };
 
 // Robust helper to parse Brazilian date formats
@@ -134,11 +151,11 @@ const calculateSalesPaymentBreakdown = (salesList: SettlementSale[]) => {
   const totals = { dinheiro: 0, pix: 0, boleto: 0, cheque: 0, outros: 0 };
   salesList.forEach(s => {
     if (s.paymentsBreakdown) {
-      totals.dinheiro += s.paymentsBreakdown.dinheiro || 0;
-      totals.pix += s.paymentsBreakdown.pix || 0;
-      totals.boleto += s.paymentsBreakdown.boleto || 0;
-      totals.cheque += s.paymentsBreakdown.cheque || 0;
-      totals.outros += s.paymentsBreakdown.outros || 0;
+      totals.dinheiro += Number(s.paymentsBreakdown.dinheiro) || 0;
+      totals.pix += Number(s.paymentsBreakdown.pix) || 0;
+      totals.boleto += Number(s.paymentsBreakdown.boleto) || 0;
+      totals.cheque += Number(s.paymentsBreakdown.cheque) || 0;
+      totals.outros += Number(s.paymentsBreakdown.outros) || 0;
     } else {
       const lineTotal = s.qty * s.value;
       const method = s.paymentMethod || 'dinheiro';
@@ -323,11 +340,18 @@ const parseOFX = (text: string, userUnit: string): BankTransaction[] => {
     }
 
     const isCredit = trntype.toUpperCase() === 'CREDIT' || amount > 0;
+    const uppercaseMemo = memo.toUpperCase();
+    const isPixDevolucao = 
+      uppercaseMemo.includes('DEVOLU') || 
+      uppercaseMemo.includes('ESTORNO') || 
+      uppercaseMemo.includes('REEMBOLSO') ||
+      uppercaseMemo.includes('DEVOLUÇÃO') ||
+      uppercaseMemo.includes('DEVOLUCAO') ||
+      uppercaseMemo.includes('DEVOLVIDO');
     
-    if (isCredit) {
+    if (isCredit || (amount < 0 && isPixDevolucao)) {
       const absAmount = Math.abs(amount);
       if (absAmount > 0) {
-        const uppercaseMemo = memo.toUpperCase();
         const isPixOrTransf = 
           uppercaseMemo.includes('PIX') ||
           uppercaseMemo.includes('TRANSF') ||
@@ -345,6 +369,7 @@ const parseOFX = (text: string, userUnit: string): BankTransaction[] => {
           uppercaseMemo.includes('COB') ||
           uppercaseMemo.includes('DINHEIRO') ||
           uppercaseMemo.includes('RECONCIL') ||
+          isPixDevolucao ||
           (!uppercaseMemo.includes('TARIFA') && 
            !uppercaseMemo.includes('SAQUE') && 
            !uppercaseMemo.includes('APLIC') && 
@@ -356,11 +381,12 @@ const parseOFX = (text: string, userUnit: string): BankTransaction[] => {
             id: 'tx-' + Math.random().toString(36).substr(2, 9),
             date: dateStr,
             description: memo,
-            amount: absAmount,
+            amount: amount < 0 ? amount : absAmount,
             documentRef: fitid || `OFX-${Math.floor(Math.random() * 1000000)}`,
             isReconciled: false,
             importedAt: new Date().toISOString(),
-            unit: (userUnit as 'matriz' | 'filial') || 'matriz'
+            unit: (userUnit as 'matriz' | 'filial') || 'matriz',
+            isRefund: amount < 0 && isPixDevolucao
           });
         }
       }
@@ -565,6 +591,20 @@ const parseCSVOrTXT = (text: string, userUnit: string): BankTransaction[] => {
   return transactions;
 };
 
+const formatBRLWithoutSymbol = (val: number): string => {
+  if (val === undefined || val === null || isNaN(val)) return '0,00';
+  const fixed = val.toFixed(2);
+  const [integerPart, decimalPart] = fixed.split('.');
+  const formattedInteger = integerPart.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  return `${formattedInteger},${decimalPart}`;
+};
+
+const parseBRLCurrency = (inputStr: string): number => {
+  const digits = inputStr.replace(/\D/g, '');
+  if (!digits) return 0;
+  return parseInt(digits, 10) / 100;
+};
+
 export const PrestacaoContas: React.FC = () => {
   const { 
     movements, 
@@ -580,14 +620,38 @@ export const PrestacaoContas: React.FC = () => {
     reconcileDriverSettlementWithPix,
     unreconcileDriverSettlement,
     removeBankTransaction,
+    deleteImportedFile,
     manuallyReconcileBankTransaction,
     undoManualReconciliation,
+    voidBankTransaction,
+    undoVoidBankTransaction,
     currentUser,
     updateMovementDetails,
-    customAvariaTypes = []
+    customAvariaTypes = [],
+    registeredCities = [],
+    driverTripLoads = [],
+    updateDriverTripLoad
   } = useStore();
 
   const [txToDelete, setTxToDelete] = useState<BankTransaction | null>(null);
+  const [refundTxToLink, setRefundTxToLink] = useState<BankTransaction | null>(null);
+  const [selectedEntryTxId, setSelectedEntryTxId] = useState<string>('');
+  const [searchInutilizarQuery, setSearchInutilizarQuery] = useState<string>('');
+
+  const isReadOnly = currentUser?.role === 'visualizador' || currentUser?.role === 'supervisor';
+
+  const getMatchingRefund = (tx: BankTransaction) => {
+    if (tx.isRefund || tx.isVoided || tx.amount <= 0) return null;
+    return (bankTransactions || []).find(refund => 
+      refund.isRefund && 
+      !refund.isReconciled && 
+      Math.abs(refund.amount) === tx.amount
+    );
+  };
+
+  const hasMatchingRefund = (tx: BankTransaction) => {
+    return getMatchingRefund(tx) !== null;
+  };
 
   const [activeSubTab, setActiveSubTab] = useState<'pending_movements' | 'history' | 'bank_reconciliation'>('pending_movements');
   const [selectedMovement, setSelectedMovement] = useState<Movement | null>(null);
@@ -601,6 +665,7 @@ export const PrestacaoContas: React.FC = () => {
   
   // Settlement Form State
   const [sales, setSales] = useState<SettlementSale[]>([]);
+  const [detailedSales, setDetailedSales] = useState<SettlementSale[]>([]);
   const [expenses, setExpenses] = useState<SettlementExpense[]>([]);
   const [suprimentos, setSuprimentos] = useState<SettlementSuprimento[]>([]);
   const [newSuprimentoItem, setNewSuprimentoItem] = useState('');
@@ -617,6 +682,7 @@ export const PrestacaoContas: React.FC = () => {
   const [dateArrival, setDateArrival] = useState('');
   const [observation, setObservation] = useState('');
   const [commissionPercent, setCommissionPercent] = useState(8);
+  const [cidade, setCidade] = useState('');
   const [formError, setFormError] = useState('');
   const [suggestedWaterQty, setSuggestedWaterQty] = useState(0);
   const [suggestedVasilhameQty, setSuggestedVasilhameQty] = useState(0);
@@ -637,16 +703,179 @@ export const PrestacaoContas: React.FC = () => {
 
     setComodatoVasilhameQty(comodatoSalesQty);
   }, [sales]);
+
+  const [isEditingMobileData, setIsEditingMobileData] = useState(false);
+  const [editingMobileTab, setEditingMobileTab] = useState<'sales' | 'expenses'>('sales');
+
+  const handleSyncMobileData = (updatedSales: SettlementSale[], updatedExpenses: SettlementExpense[]) => {
+    if (!selectedMovement) return;
+
+    // 1. Calculate autoPayments
+    const autoPayments = { dinheiro: 0, pix: 0, boleto: 0, cheque: 0, outros: 0 };
+    updatedSales.forEach(s => {
+      if (s.paymentsBreakdown) {
+        autoPayments.dinheiro += Number(s.paymentsBreakdown.dinheiro) || 0;
+        autoPayments.pix += Number(s.paymentsBreakdown.pix) || 0;
+        autoPayments.boleto += Number(s.paymentsBreakdown.boleto) || 0;
+        autoPayments.cheque += Number(s.paymentsBreakdown.cheque) || 0;
+        autoPayments.outros += Number(s.paymentsBreakdown.outros) || 0;
+      } else {
+        const method = s.paymentMethod || 'dinheiro';
+        const lineTotal = (s.qty || 0) * (s.value || 0);
+        if (method === 'dinheiro') autoPayments.dinheiro += lineTotal;
+        else if (method === 'pix') autoPayments.pix += lineTotal;
+        else if (method === 'boleto') autoPayments.boleto += lineTotal;
+        else if (method === 'cheque') autoPayments.cheque += lineTotal;
+        else autoPayments.outros += lineTotal;
+      }
+    });
+
+    autoPayments.dinheiro = Number(autoPayments.dinheiro.toFixed(2));
+    autoPayments.pix = Number(autoPayments.pix.toFixed(2));
+    autoPayments.boleto = Number(autoPayments.boleto.toFixed(2));
+    autoPayments.cheque = Number(autoPayments.cheque.toFixed(2));
+    autoPayments.outros = Number(autoPayments.outros.toFixed(2));
+
+    // 2. Group the sales by product type/price and strip client names
+    const groupedSalesMap = new Map<string, SettlementSale>();
+    updatedSales.forEach(s => {
+      let cleanItem = s.item;
+      if (s.clientName && s.item.startsWith(s.clientName + ' - ')) {
+        cleanItem = s.item.substring(s.clientName.length + 3);
+      } else {
+        const itemParts = s.item.split(' - ');
+        cleanItem = itemParts.length > 1 ? itemParts.slice(1).join(' - ') : s.item;
+      }
+      if (!isDisposableProduct(cleanItem) && (cleanItem.toLowerCase().includes("água") || cleanItem.toLowerCase().includes("agua"))) cleanItem = "Água 20 Lts";
+      if (cleanItem.toLowerCase() === 'vasilhame') cleanItem = 'Vasilhame';
+      if (cleanItem.toLowerCase().includes('bonifica')) cleanItem = 'Bonificação';
+      if (cleanItem.toLowerCase().includes('comodato')) cleanItem = 'Comodato (Vasilhame)';
+      if (cleanItem.toLowerCase().includes('retorno')) cleanItem = 'Retorno Comodato (Vasilhame)';
+
+      const key = `${cleanItem}_${(s.value || 0).toFixed(2)}`;
+      
+      if (groupedSalesMap.has(key)) {
+        const existing = groupedSalesMap.get(key)!;
+        existing.qty += s.qty;
+        existing.qty = Math.round(existing.qty); 
+        if (s.paymentsBreakdown) {
+          if (!existing.paymentsBreakdown) {
+            existing.paymentsBreakdown = { dinheiro: 0, pix: 0, boleto: 0, cheque: 0, outros: 0 };
+          }
+          existing.paymentsBreakdown.dinheiro += Number(s.paymentsBreakdown.dinheiro) || 0;
+          existing.paymentsBreakdown.pix += Number(s.paymentsBreakdown.pix) || 0;
+          existing.paymentsBreakdown.boleto += Number(s.paymentsBreakdown.boleto) || 0;
+          existing.paymentsBreakdown.cheque += Number(s.paymentsBreakdown.cheque) || 0;
+          existing.paymentsBreakdown.outros += Number(s.paymentsBreakdown.outros) || 0;
+        } else {
+          if (!existing.paymentsBreakdown) {
+            existing.paymentsBreakdown = { dinheiro: 0, pix: 0, boleto: 0, cheque: 0, outros: 0 };
+          }
+          const sMethod = s.paymentMethod || 'dinheiro';
+          const sTotal = s.qty * s.value;
+          if (sMethod === 'dinheiro') existing.paymentsBreakdown.dinheiro += sTotal;
+          else if (sMethod === 'pix') existing.paymentsBreakdown.pix += sTotal;
+          else if (sMethod === 'boleto') existing.paymentsBreakdown.boleto += sTotal;
+          else if (sMethod === 'cheque') existing.paymentsBreakdown.cheque += sTotal;
+          else existing.paymentsBreakdown.outros += sTotal;
+        }
+      } else {
+        const initBreakdown = { dinheiro: 0, pix: 0, boleto: 0, cheque: 0, outros: 0 };
+        if (s.paymentsBreakdown) {
+          initBreakdown.dinheiro = Number(s.paymentsBreakdown.dinheiro) || 0;
+          initBreakdown.pix = Number(s.paymentsBreakdown.pix) || 0;
+          initBreakdown.boleto = Number(s.paymentsBreakdown.boleto) || 0;
+          initBreakdown.cheque = Number(s.paymentsBreakdown.cheque) || 0;
+          initBreakdown.outros = Number(s.paymentsBreakdown.outros) || 0;
+        } else {
+          const sMethod = s.paymentMethod || 'dinheiro';
+          const sTotal = s.qty * s.value;
+          if (sMethod === 'dinheiro') initBreakdown.dinheiro = sTotal;
+          else if (sMethod === 'pix') initBreakdown.pix = sTotal;
+          else if (sMethod === 'boleto') initBreakdown.boleto = sTotal;
+          else if (sMethod === 'cheque') initBreakdown.cheque = sTotal;
+          else initBreakdown.outros = sTotal;
+        }
+
+        groupedSalesMap.set(key, {
+          id: 'grp-' + Math.random().toString(36).substring(2, 9),
+          saleNumber: 'consolidado',
+          item: cleanItem,
+          qty: Math.round(s.qty),
+          value: s.value,
+          paymentMethod: 'consolidado',
+          productType: s.productType,
+          paymentsBreakdown: initBreakdown
+        });
+      }
+    });
+
+    const initialSales = Array.from(groupedSalesMap.values());
+    setSales(initialSales);
+
+    // 3. Set expenses
+    let initialExpenses = updatedExpenses;
+    if (initialExpenses.length === 0) {
+      initialExpenses = [
+        {
+          id: 'exp-almoco-' + Date.now().toString(36) + '1',
+          item: 'Almoço',
+          value: 0
+        },
+        {
+          id: 'exp-ajudante-' + Date.now().toString(36) + '2',
+          item: 'Ajudante',
+          value: 0
+        }
+      ];
+    }
+    setExpenses(initialExpenses);
+
+    // 4. Update payments (cash registry)
+    const totalExpenses = initialExpenses.reduce((sum, e) => sum + e.value, 0);
+    const totalSuprimentos = suprimentos.reduce((sum, s) => sum + s.value, 0);
+    setPayments({
+      dinheiro: Number(Math.max(0, autoPayments.dinheiro - totalExpenses + totalSuprimentos).toFixed(2)),
+      pix: autoPayments.pix,
+      boleto: autoPayments.boleto,
+      cheque: autoPayments.cheque,
+      outros: autoPayments.outros
+    });
+
+    // 5. Update movement details in store
+    updateMovementDetails(selectedMovement.id, {
+      productionControl: {
+        ...selectedMovement.productionControl,
+        mobileSales: updatedSales,
+        mobileExpenses: updatedExpenses
+      }
+    });
+
+    // 6. Force reactive update of local selectedMovement state
+    setSelectedMovement(prev => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        productionControl: {
+          ...prev.productionControl,
+          mobileSales: updatedSales,
+          mobileExpenses: updatedExpenses
+        }
+      };
+    });
+  };
+
   const [selectedPixTxIds, setSelectedPixTxIds] = useState<string[]>([]);
 
   // Manual sale entry states (similar to driver's cart workflow)
   const [manualSaleClientName, setManualSaleClientName] = useState('');
   const [showManualSaleClientDropdown, setShowManualSaleClientDropdown] = useState(false);
-  const [manualSaleProductType, setManualSaleProductType] = useState<'agua' | 'vasilhame' | 'bonificacao' | 'comodato'>('agua');
+  const [manualSaleProductType, setManualSaleProductType] = useState<'agua' | 'agua_copo' | 'garrafa510' | 'garrafa15l' | 'vasilhame' | 'bonificacao' | 'comodato' | 'retorno' | 'troca'>('agua');
   const [manualSaleQty, setManualSaleQty] = useState<number | ''>('');
   const [manualSaleUnitPrice, setManualSaleUnitPrice] = useState<number | ''>('');
-  const [manualSaleCart, setManualSaleCart] = useState<Array<{ productType: 'agua' | 'vasilhame' | 'bonificacao' | 'comodato'; qty: number; unitPrice: number }>>([]);
-
+  const [manualExchangeRatio, setManualExchangeRatio] = useState<number>(4);
+  const [manualExchangeAvariasQty, setManualExchangeAvariasQty] = useState<number | ''>('');
+  const [manualSaleCart, setManualSaleCart] = useState<Array<{ productType: 'agua' | 'agua_copo' | 'garrafa510' | 'garrafa15l' | 'vasilhame' | 'bonificacao' | 'comodato' | 'retorno' | 'troca'; qty: number; unitPrice: number; exchangeAvariasQty?: number; exchangeRatio?: number }>>([]);
   const [manualPayDinheiro, setManualPayDinheiro] = useState<string>('');
   const [manualPayPix, setManualPayPix] = useState<string>('');
   const [manualPayBoleto, setManualPayBoleto] = useState<string>('');
@@ -657,16 +886,36 @@ export const PrestacaoContas: React.FC = () => {
   const getManualProductDisplayName = (type: string) => {
     switch (type) {
       case 'agua': return 'Água 20 Lts';
+      case 'agua_copo': return 'Água Copo 200ml (Cx c/ 48un)';
+      case 'garrafa510': return 'Água Garrafa 510ml (Fd c/ 12un)';
+      case 'garrafa15l': return 'Água Garrafa 1,5L (Fd c/ 6un)';
       case 'vasilhame': return 'Vasilhame';
       case 'bonificacao': return 'Bonificação de Água';
       case 'comodato': return 'Comodato de Vasilhame';
+      case 'retorno': return 'Retorno Comodato (Vasilhame)';
+      case 'troca': return 'Troca Vasilhame/Água';
       default: return type;
     }
   };
 
+  useEffect(() => {
+    if (manualSaleProductType === 'troca' && typeof manualSaleQty === 'number' && manualSaleQty > 0) {
+      setManualExchangeAvariasQty(manualSaleQty * manualExchangeRatio);
+    } else {
+      setManualExchangeAvariasQty('');
+    }
+  }, [manualSaleQty, manualExchangeRatio, manualSaleProductType]);
+
   // Bank Reconciliation States
   const [txToManualReconcile, setTxToManualReconcile] = useState<BankTransaction | null>(null);
   const [manualReconcileReason, setManualReconcileReason] = useState('');
+  const [selectedBankTxIds, setSelectedBankTxIds] = useState<string[]>([]);
+  const [fileToDelete, setFileToDelete] = useState<{ id: string; name: string } | null>(null);
+  const [bulkManualReconcileReason, setBulkManualReconcileReason] = useState('');
+  const [showBulkReconcileModal, setShowBulkReconcileModal] = useState(false);
+  const [showBulkDeleteModal, setShowBulkDeleteModal] = useState(false);
+  const [selectedImportInstitution, setSelectedImportInstitution] = useState<string>('auto');
+  const [customImportInstitution, setCustomImportInstitution] = useState<string>('');
 
   // Expense inputs state
   const [newExpenseItem, setNewExpenseItem] = useState('');
@@ -675,6 +924,7 @@ export const PrestacaoContas: React.FC = () => {
   // File Upload Ref
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [importSuccessMessage, setImportSuccessMessage] = useState('');
+  const [importErrorMessage, setImportErrorMessage] = useState('');
 
   // Viewing detail Modal state
   const [viewingSettlement, setViewingSettlement] = useState<DriverSettlement | null>(null);
@@ -696,7 +946,8 @@ export const PrestacaoContas: React.FC = () => {
 
   // Search query for bank transactions tab
   const [searchBankQuery, setSearchBankQuery] = useState('');
-  const [filterBankReconciliation, setFilterBankReconciliation] = useState<'all' | 'reconciled' | 'pending'>('all');
+  const [filterBankReconciliation, setFilterBankReconciliation] = useState<'all' | 'reconciled' | 'pending' | 'refunds'>('all');
+  const [filterBankInstitution, setFilterBankInstitution] = useState<string>('all');
 
   // Filter completed settlements
   const filteredCompletedSettlements = React.useMemo(() => {
@@ -813,6 +1064,7 @@ export const PrestacaoContas: React.FC = () => {
     let totalAvariaDeductions = 0;
     let totalShortageDeductions = 0;
     let totalFinalCommissions = 0;
+    let totalSobraCaixa = 0;
 
     completed.forEach(ds => {
       const p = ds.payments || { dinheiro: 0, pix: 0, boleto: 0, cheque: 0, outros: 0 };
@@ -841,6 +1093,11 @@ export const PrestacaoContas: React.FC = () => {
       totalAvariaDeductions += ds.avariaDeduction || 0;
       totalShortageDeductions += ds.shortageDeduction || 0;
       totalFinalCommissions += ds.finalCommission || 0;
+
+      // Sum sobra de caixa (positive differences)
+      if (ds.difference && ds.difference > 0) {
+        totalSobraCaixa += ds.difference;
+      }
       
       // Since ds.payments.dinheiro is the net cash delivered,
       // The gross cash sales = delivered cash + expenses paid in cash + shortage difference (if any)
@@ -856,7 +1113,7 @@ export const PrestacaoContas: React.FC = () => {
       totalSalesDinheiro += Math.max(0, totalSales - otherSales);
     });
 
-    const netDinheiro = totalSalesDinheiro - totalExpenses + totalSuprimentos - totalFinalCommissions - totalShortageDeductions;
+    const netDinheiro = totalSalesDinheiro - totalExpenses + totalSuprimentos - totalFinalCommissions - totalShortageDeductions + totalSobraCaixa;
     const totalCaixaGeral = netDinheiro + totalSalesPix + totalSalesBoleto + totalSalesCheque + totalSalesOutros;
 
     return {
@@ -871,11 +1128,56 @@ export const PrestacaoContas: React.FC = () => {
       totalAvariaDeductions,
       totalShortageDeductions,
       totalFinalCommissions,
+      totalSobraCaixa,
       netDinheiro,
       totalCaixaGeral,
       completedCount: completed.length
     };
   }, [filteredCompletedSettlements]);
+
+  // Lookup maps and sets for ultra-fast calculations
+  const registeredVehiclesByCleanPlate = React.useMemo(() => {
+    const map = new Map<string, any>();
+    (registeredVehicles || []).forEach(v => {
+      const cp = (v?.plate || '').replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+      if (cp) map.set(cp, v);
+    });
+    return map;
+  }, [registeredVehicles]);
+
+  const registeredDriversByCleanName = React.useMemo(() => {
+    const map = new Map<string, any>();
+    (registeredDrivers || []).forEach(d => {
+      const cn = (d?.name || '').toLowerCase().trim();
+      if (cn) map.set(cn, d);
+    });
+    return map;
+  }, [registeredDrivers]);
+
+  const movementsByPlateMap = React.useMemo(() => {
+    const map = new Map<string, Movement[]>();
+    for (const m of movements) {
+      const cp = (m.plate || '').replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+      if (!map.has(cp)) map.set(cp, []);
+      map.get(cp)!.push(m);
+    }
+    return map;
+  }, [movements]);
+
+  const completedSettledMovementIdsSet = React.useMemo(() => {
+    const set = new Set<string>();
+    for (const ds of driverSettlements) {
+      if (ds.status === 'completed' && ds.movementId) {
+        set.add(ds.movementId);
+        if (ds.movementId.startsWith('settled-')) {
+          set.add(ds.movementId.replace('settled-', ''));
+        } else {
+          set.add(`settled-${ds.movementId}`);
+        }
+      }
+    }
+    return set;
+  }, [driverSettlements]);
 
   // 1. FILTER MOVEMENTS PENDING SETTLEMENT
 
@@ -886,9 +1188,10 @@ export const PrestacaoContas: React.FC = () => {
     // Find subsequent movements of the same vehicle that started after this departure
     const refTime = new Date(mov.exitTimestamp || mov.timestamp).getTime();
     const cleanPlate = mov.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase();
-    const returns = movements.filter(m => 
+    const plateMovements = movementsByPlateMap.get(cleanPlate) || [];
+
+    const returns = plateMovements.filter(m => 
       m.id !== mov.id &&
-      m.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase() === cleanPlate && 
       new Date(m.entryTimestamp || m.timestamp).getTime() > refTime
     );
     
@@ -899,9 +1202,8 @@ export const PrestacaoContas: React.FC = () => {
     const candidateTime = new Date(candidate.entryTimestamp || candidate.timestamp).getTime();
     
     // Check if there is another 'saida' movement of the same vehicle between mov and candidate
-    const hasIntermediateSaida = movements.some(m => 
+    const hasIntermediateSaida = plateMovements.some(m => 
       m.type === 'saida' &&
-      m.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase() === cleanPlate &&
       m.id !== mov.id &&
       m.id !== candidate.id &&
       (() => {
@@ -913,7 +1215,7 @@ export const PrestacaoContas: React.FC = () => {
     if (hasIntermediateSaida) return null;
     
     return candidate;
-  }, [movements]);
+  }, [movementsByPlateMap]);
 
   // Find departure (saida) movement for a given return (entrada) movement
   const getDepartureMovement = React.useCallback((entrada: Movement) => {
@@ -922,9 +1224,10 @@ export const PrestacaoContas: React.FC = () => {
     // Find prior movements of the same vehicle that started before this arrival
     const refTime = new Date(entrada.entryTimestamp || entrada.timestamp).getTime();
     const cleanPlate = entrada.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase();
-    const departures = movements.filter(m => 
+    const plateMovements = movementsByPlateMap.get(cleanPlate) || [];
+
+    const departures = plateMovements.filter(m => 
       m.type === 'saida' &&
-      m.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase() === cleanPlate && 
       m.id !== entrada.id &&
       new Date(m.exitTimestamp || m.timestamp).getTime() < refTime
     );
@@ -936,9 +1239,8 @@ export const PrestacaoContas: React.FC = () => {
     const candidateTime = new Date(candidate.exitTimestamp || candidate.timestamp).getTime();
     
     // Check if there is another 'entrada' movement of the same vehicle between candidate and entrada
-    const hasIntermediateEntrada = movements.some(m => 
+    const hasIntermediateEntrada = plateMovements.some(m => 
       m.type === 'entrada' &&
-      m.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase() === cleanPlate &&
       m.id !== entrada.id &&
       m.id !== candidate.id &&
       (() => {
@@ -950,35 +1252,34 @@ export const PrestacaoContas: React.FC = () => {
     if (hasIntermediateEntrada) return null;
     
     return candidate; // Return the latest departure before this entry
-  }, [movements]);
+  }, [movementsByPlateMap]);
 
   const isProprioMovement = React.useCallback((m: Movement) => {
     if (m.ownerType === 'proprio') return true;
-    const cleanPlate = m.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase();
-    const matchedVeh = registeredVehicles.find(v => v.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase() === cleanPlate);
+    const cleanPlate = (m.plate || '').replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+    const matchedVeh = registeredVehiclesByCleanPlate.get(cleanPlate);
     if (matchedVeh && matchedVeh.ownerType === 'proprio') return true;
-    const matchedDrv = registeredDrivers.find(d => d.name.toLowerCase().trim() === m.driver.toLowerCase().trim());
-    if (matchedDrv && matchedDrv.driverType === 'interno') return true;
+    const driverName = (m.driver || '').toLowerCase().trim();
+    if (driverName) {
+      const matchedDrv = registeredDriversByCleanName.get(driverName);
+      if (matchedDrv && matchedDrv.driverType === 'interno') return true;
+    }
     return false;
-  }, [registeredVehicles, registeredDrivers]);
+  }, [registeredVehiclesByCleanPlate, registeredDriversByCleanName]);
 
   const movementsPendingSettlement = React.useMemo(() => {
-    // Find all 'saida' movements (all trips need settlement regardless of owner)
-    const ownSaidas = movements.filter(m => m.type === 'saida');
+    // Find all 'saida' movements (only proprio trips need settlement)
+    const ownSaidas = movements.filter(m => m.type === 'saida' && isProprioMovement(m));
     
     const pending: Movement[] = [];
     
     ownSaidas.forEach(saida => {
       // 1. Check if this saida is already settled (checking both raw and prefixed IDs)
-      const isSettled = driverSettlements.some(ds => {
-        if (ds.status !== 'completed') return false;
-        return ds.movementId === saida.id || ds.movementId === `settled-${saida.id}`;
-      });
+      const isSettled = completedSettledMovementIdsSet.has(saida.id);
       if (isSettled) return;
 
       // 2. Check if there is a subsequent return movement for this plate
-      const retMov = getReturnMovement(saida);
-      // We no longer skip if !retMov, so it shows up as "Não Retornado" and locked.
+      getReturnMovement(saida);
 
       // Add to pending
       pending.push(saida);
@@ -986,37 +1287,40 @@ export const PrestacaoContas: React.FC = () => {
 
     // Return them in reverse chronological order (newest first)
     return pending.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-  }, [movements, driverSettlements, getReturnMovement]);
+  }, [movements, completedSettledMovementIdsSet, getReturnMovement, isProprioMovement]);
 
   const activeTripsOnRoad = React.useMemo(() => {
-    // Find all 'saida' movements
-    const salidas = movements.filter(m => m.type === 'saida');
+    // Find all 'saida' movements OR 'entrada' movements that have completed loading (only proprio)
+    const eligible = movements.filter(m => 
+      (m.type === 'saida' || 
+      (m.type === 'entrada' && m.kanbanStep === 'concluido')) &&
+      isProprioMovement(m)
+    );
     
-    return salidas.filter(saida => {
+    return eligible.filter(mov => {
       // 1. Filter out if this trip is already settled (checking both raw and prefixed IDs)
-      const isSettled = driverSettlements.some(ds => {
-        if (ds.status !== 'completed') return false;
-        return ds.movementId === saida.id || ds.movementId === `settled-${saida.id}`;
-      });
+      const isSettled = completedSettledMovementIdsSet.has(mov.id);
       if (isSettled) return false;
 
-      // 2. Check if it has returned (any subsequent entry or departure of the same plate)
-      const hasReturned = movements.some(m => {
-        if (m.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase() !== saida.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase() || m.id === saida.id) {
-          return false;
-        }
-        
-        // It must be subsequent to the departure
-        const isSubsequent = new Date(m.timestamp).getTime() > new Date(saida.exitTimestamp || saida.timestamp).getTime();
-        if (!isSubsequent) return false;
+      // 2. Check if it has returned (only applicable for 'saida' movements)
+      if (mov.type === 'saida') {
+        const cleanPlate = mov.plate.replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+        const plateMovements = movementsByPlateMap.get(cleanPlate) || [];
+        const movTime = new Date(mov.exitTimestamp || mov.timestamp).getTime();
 
-        // If it registered entry (entrada) or a newer exit (saida), the trip is completed
-        return m.type === 'entrada' || m.type === 'saida';
-      });
+        const hasReturned = plateMovements.some(m => {
+          if (m.id === mov.id) return false;
+          const isSubsequent = new Date(m.timestamp).getTime() > movTime;
+          if (!isSubsequent) return false;
+          return m.type === 'entrada' || m.type === 'saida';
+        });
 
-      return !hasReturned;
+        if (hasReturned) return false;
+      }
+
+      return true;
     }).sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-  }, [movements, driverSettlements]);
+  }, [movements, completedSettledMovementIdsSet, isProprioMovement, movementsByPlateMap]);
 
   const selectedReturnMovement = React.useMemo(() => {
     if (!selectedMovement) return null;
@@ -1086,7 +1390,9 @@ export const PrestacaoContas: React.FC = () => {
       const group = groups[key];
       
       let prodDisplayName = s.item;
-      if (s.item.includes(' - ')) {
+      if (s.clientName && s.item.startsWith(s.clientName + ' - ')) {
+        prodDisplayName = s.item.substring(s.clientName.length + 3);
+      } else if (s.item.includes(' - ')) {
         prodDisplayName = s.item.split(' - ').slice(1).join(' - ');
       }
 
@@ -1111,11 +1417,11 @@ export const PrestacaoContas: React.FC = () => {
 
       // Aggregate payments
       if (s.paymentsBreakdown) {
-        group.payments.dinheiro += s.paymentsBreakdown.dinheiro || 0;
-        group.payments.pix += s.paymentsBreakdown.pix || 0;
-        group.payments.boleto += s.paymentsBreakdown.boleto || 0;
-        group.payments.cheque += s.paymentsBreakdown.cheque || 0;
-        group.payments.outros += s.paymentsBreakdown.outros || 0;
+        group.payments.dinheiro += Number(s.paymentsBreakdown.dinheiro) || 0;
+        group.payments.pix += Number(s.paymentsBreakdown.pix) || 0;
+        group.payments.boleto += Number(s.paymentsBreakdown.boleto) || 0;
+        group.payments.cheque += Number(s.paymentsBreakdown.cheque) || 0;
+        group.payments.outros += Number(s.paymentsBreakdown.outros) || 0;
       } else {
         const method = s.paymentMethod || 'dinheiro';
         const amt = lineTotalValue;
@@ -1166,12 +1472,24 @@ export const PrestacaoContas: React.FC = () => {
   const difference = totalDelivered - totalToReceive;
 
   // Commission Calculations
-  // Only water sales (items with 'água' or 'agua' in name) generate commission, not container (vasilhame) sales
-  const waterSalesAmount = sales
-    .filter(s => s.item.toLowerCase().includes('água') || s.item.toLowerCase().includes('agua') || s.item.toLowerCase().includes('bonifica'))
+  // Galão 20L water sales generate commission defined by commissionPercent (%)
+  // Disposable Copo 200ml (caixas de copo) generates 1.5% commission
+  const isCopoItem = (itemStr: string) => {
+    const l = (itemStr || '').toLowerCase();
+    return l.includes('copo') || l.includes('200ml') || l.includes('cx c/ 48');
+  };
+
+  const copoSalesAmount = sales
+    .filter(s => isCopoItem(s.item))
     .reduce((acc, curr) => acc + (curr.qty * curr.value), 0);
 
-  const basicCommission = waterSalesAmount * (commissionPercent / 100);
+  const galaoWaterSalesAmount = sales
+      .filter(s => (s.item.toLowerCase().includes('água') || s.item.toLowerCase().includes('agua') || s.item.toLowerCase().includes('bonifica')) && !isDisposableProduct(s.item))
+    .reduce((acc, curr) => acc + (curr.qty * curr.value), 0);
+
+  const copoCommission = copoSalesAmount * 0.015;
+  const galaoCommission = galaoWaterSalesAmount * (commissionPercent / 100);
+  const basicCommission = galaoCommission + copoCommission;
   
   const getCalculatedMissingBottles = () => {
     if (!selectedMovement || !resolvedProductionControl) return 0;
@@ -1249,24 +1567,24 @@ export const PrestacaoContas: React.FC = () => {
     const unloadAvarias = mergedControl.avariasDescarregamento || [];
     const vencidoCheioQty = unloadAvarias
       .filter(a => {
-        const t = a.type.toLowerCase().trim();
+        const t = (a?.type || '').toLowerCase().trim();
         return t.includes('vencido (cheio)') || t.includes('vencido cheio');
       })
-      .reduce((sum, item) => sum + item.qty, 0);
+      .reduce((sum, item) => sum + (item.qty || 0), 0);
 
     const quebradoLacradoQty = unloadAvarias
       .filter(a => {
-        const t = a.type.toLowerCase().trim();
+        const t = (a?.type || '').toLowerCase().trim();
         return t.includes('quebrado lacrado');
       })
-      .reduce((sum, item) => sum + item.qty, 0);
+      .reduce((sum, item) => sum + (item.qty || 0), 0);
 
     const microfuroQty = unloadAvarias
       .filter(a => {
-        const t = a.type.toLowerCase().trim();
+        const t = (a?.type || '').toLowerCase().trim();
         return t === 'microfuro' || t.includes('microfuro');
       })
-      .reduce((sum, item) => sum + item.qty, 0);
+      .reduce((sum, item) => sum + (item.qty || 0), 0);
 
     const calcMissingBottlesQty = mergedControl.differenceReasonsBreakdown?.find(b => b.reason === 'falta')?.qty || (() => {
       const isProprio = isProprioMovement(baseMov);
@@ -1300,6 +1618,7 @@ export const PrestacaoContas: React.FC = () => {
 
     if (existingDraft) {
       setSales(existingDraft.sales || []);
+      setDetailedSales(existingDraft.detailedSales || existingDraft.sales || []);
       setExpenses(existingDraft.expenses || []);
       setSuprimentos(existingDraft.suprimentos || []);
       setPayments(existingDraft.payments || { dinheiro: 0, pix: 0, boleto: 0, cheque: 0, outros: 0 });
@@ -1309,6 +1628,7 @@ export const PrestacaoContas: React.FC = () => {
       setVendaVasilhameQty(existingDraft.vendaVasilhameQty || 0);
       setComodatoVasilhameQty(existingDraft.comodatoVasilhameQty || 0);
       setObservation(existingDraft.observation || '');
+      setCidade(existingDraft.cidade || '');
       setDateArrival(existingDraft.dateArrival || nowStr);
       setCommissionPercent(existingDraft.commissionPercent || 8);
       setManualSaleClientName('');
@@ -1335,11 +1655,11 @@ export const PrestacaoContas: React.FC = () => {
       const autoPayments = { dinheiro: 0, pix: 0, boleto: 0, cheque: 0, outros: 0 };
       rawMobileSales.forEach(s => {
         if (s.paymentsBreakdown) {
-          autoPayments.dinheiro += s.paymentsBreakdown.dinheiro || 0;
-          autoPayments.pix += s.paymentsBreakdown.pix || 0;
-          autoPayments.boleto += s.paymentsBreakdown.boleto || 0;
-          autoPayments.cheque += s.paymentsBreakdown.cheque || 0;
-          autoPayments.outros += s.paymentsBreakdown.outros || 0;
+          autoPayments.dinheiro += Number(s.paymentsBreakdown.dinheiro) || 0;
+          autoPayments.pix += Number(s.paymentsBreakdown.pix) || 0;
+          autoPayments.boleto += Number(s.paymentsBreakdown.boleto) || 0;
+          autoPayments.cheque += Number(s.paymentsBreakdown.cheque) || 0;
+          autoPayments.outros += Number(s.paymentsBreakdown.outros) || 0;
         } else {
           const method = s.paymentMethod || 'dinheiro';
           const lineTotal = s.qty * s.value;
@@ -1369,11 +1689,16 @@ export const PrestacaoContas: React.FC = () => {
       
       rawMobileSales.forEach(s => {
         // Remove client name prefix (e.g. "João - Água 20L" -> "Água 20L")
-        const itemParts = s.item.split(' - ');
-        let cleanItem = itemParts.length > 1 ? itemParts.slice(1).join(' - ') : s.item;
+        let cleanItem = s.item;
+        if (s.clientName && s.item.startsWith(s.clientName + ' - ')) {
+          cleanItem = s.item.substring(s.clientName.length + 3);
+        } else {
+          const itemParts = s.item.split(' - ');
+          cleanItem = itemParts.length > 1 ? itemParts.slice(1).join(' - ') : s.item;
+        }
         
         // Map common names
-        if (cleanItem.toLowerCase().includes('água') || cleanItem.toLowerCase().includes('agua')) cleanItem = 'Água 20 Lts';
+        if (!isDisposableProduct(cleanItem) && (cleanItem.toLowerCase().includes('água') || cleanItem.toLowerCase().includes('agua'))) cleanItem = 'Água 20 Lts';
         if (cleanItem.toLowerCase() === 'vasilhame') cleanItem = 'Vasilhame';
         if (cleanItem.toLowerCase().includes('bonifica')) cleanItem = 'Bonificação';
         if (cleanItem.toLowerCase().includes('comodato')) cleanItem = 'Comodato (Vasilhame)';
@@ -1386,7 +1711,45 @@ export const PrestacaoContas: React.FC = () => {
           existing.qty += s.qty;
           // Clean up floating point precision issues from splits (force integer)
           existing.qty = Math.round(existing.qty); 
+          if (s.paymentsBreakdown) {
+            if (!existing.paymentsBreakdown) {
+              existing.paymentsBreakdown = { dinheiro: 0, pix: 0, boleto: 0, cheque: 0, outros: 0 };
+            }
+            existing.paymentsBreakdown.dinheiro += Number(s.paymentsBreakdown.dinheiro) || 0;
+            existing.paymentsBreakdown.pix += Number(s.paymentsBreakdown.pix) || 0;
+            existing.paymentsBreakdown.boleto += Number(s.paymentsBreakdown.boleto) || 0;
+            existing.paymentsBreakdown.cheque += Number(s.paymentsBreakdown.cheque) || 0;
+            existing.paymentsBreakdown.outros += Number(s.paymentsBreakdown.outros) || 0;
+          } else {
+            if (!existing.paymentsBreakdown) {
+              existing.paymentsBreakdown = { dinheiro: 0, pix: 0, boleto: 0, cheque: 0, outros: 0 };
+            }
+            const sMethod = s.paymentMethod || 'dinheiro';
+            const sTotal = s.qty * s.value;
+            if (sMethod === 'dinheiro') existing.paymentsBreakdown.dinheiro += sTotal;
+            else if (sMethod === 'pix') existing.paymentsBreakdown.pix += sTotal;
+            else if (sMethod === 'boleto') existing.paymentsBreakdown.boleto += sTotal;
+            else if (sMethod === 'cheque') existing.paymentsBreakdown.cheque += sTotal;
+            else existing.paymentsBreakdown.outros += sTotal;
+          }
         } else {
+          const initBreakdown = { dinheiro: 0, pix: 0, boleto: 0, cheque: 0, outros: 0 };
+          if (s.paymentsBreakdown) {
+            initBreakdown.dinheiro = Number(s.paymentsBreakdown.dinheiro) || 0;
+            initBreakdown.pix = Number(s.paymentsBreakdown.pix) || 0;
+            initBreakdown.boleto = Number(s.paymentsBreakdown.boleto) || 0;
+            initBreakdown.cheque = Number(s.paymentsBreakdown.cheque) || 0;
+            initBreakdown.outros = Number(s.paymentsBreakdown.outros) || 0;
+          } else {
+            const sMethod = s.paymentMethod || 'dinheiro';
+            const sTotal = s.qty * s.value;
+            if (sMethod === 'dinheiro') initBreakdown.dinheiro = sTotal;
+            else if (sMethod === 'pix') initBreakdown.pix = sTotal;
+            else if (sMethod === 'boleto') initBreakdown.boleto = sTotal;
+            else if (sMethod === 'cheque') initBreakdown.cheque = sTotal;
+            else initBreakdown.outros = sTotal;
+          }
+
           groupedSalesMap.set(key, {
             id: 'grp-' + Math.random().toString(36).substring(2, 9),
             saleNumber: 'consolidado',
@@ -1394,7 +1757,8 @@ export const PrestacaoContas: React.FC = () => {
             qty: Math.round(s.qty), // force integer
             value: s.value,
             paymentMethod: 'consolidado', // we no longer care about item-level payment methods
-            productType: s.productType
+            productType: s.productType,
+            paymentsBreakdown: initBreakdown
           });
         }
       });
@@ -1439,6 +1803,7 @@ export const PrestacaoContas: React.FC = () => {
       };
 
       setSales(initialSales);
+      setDetailedSales(rawMobileSales);
       setExpenses(initialExpenses);
       setSuprimentos(initialSuprimentos);
       
@@ -1463,6 +1828,7 @@ export const PrestacaoContas: React.FC = () => {
       setNewSuprimentoItem('');
       setNewSuprimentoValue(0);
       setObservation('');
+      setCidade('');
       setFormError('');
       setDateArrival(nowStr);
       setSearchPixInActiveSettlementQuery('');
@@ -1482,7 +1848,7 @@ export const PrestacaoContas: React.FC = () => {
       alert("Por favor, preencha uma quantidade válida.");
       return;
     }
-    const isZeroVal = manualSaleProductType === 'bonificacao' || manualSaleProductType === 'comodato';
+    const isZeroVal = manualSaleProductType === 'bonificacao' || manualSaleProductType === 'comodato' || manualSaleProductType === 'retorno' || manualSaleProductType === 'troca';
     const unitPrice = isZeroVal ? 0 : (manualSaleUnitPrice === '' ? 0 : Number(manualSaleUnitPrice));
     
     if (!isZeroVal && unitPrice <= 0) {
@@ -1495,13 +1861,17 @@ export const PrestacaoContas: React.FC = () => {
       {
         productType: manualSaleProductType,
         qty: Number(manualSaleQty),
-        unitPrice: unitPrice
+        unitPrice: unitPrice,
+        exchangeAvariasQty: manualSaleProductType === 'troca' ? (Number(manualExchangeAvariasQty) || 0) : undefined,
+        exchangeRatio: manualSaleProductType === 'troca' ? (Number(manualExchangeRatio) || 4) : undefined
       }
     ]);
 
     // Clear product inputs (but keep client name selected!)
     setManualSaleQty('');
     setManualSaleUnitPrice('');
+    setManualExchangeRatio(4);
+    setManualExchangeAvariasQty('');
   };
 
   const handleRemoveFromManualCart = (index: number) => {
@@ -1560,7 +1930,9 @@ export const PrestacaoContas: React.FC = () => {
         productType: item.productType,
         clientName: manualSaleClientName.trim(),
         timestamp: saleTimestamp,
-        paymentsBreakdown: { dinheiro: 0, pix: 0, boleto: 0, cheque: 0, outros: 0 }
+        paymentsBreakdown: { dinheiro: 0, pix: 0, boleto: 0, cheque: 0, outros: 0 },
+        exchangeAvariasQty: item.exchangeAvariasQty,
+        exchangeRatio: item.exchangeRatio
       });
     });
 
@@ -1631,6 +2003,7 @@ export const PrestacaoContas: React.FC = () => {
     }
 
     setSales([...sales, ...finalSalesToAdd]);
+    setDetailedSales([...detailedSales, ...finalSalesToAdd]);
 
     // Also increase the cash register payments
     setPayments(prev => ({
@@ -1714,18 +2087,29 @@ export const PrestacaoContas: React.FC = () => {
     if (saleToRemove) {
       const isZeroVal = saleToRemove.item.toLowerCase().includes('bonifica') || saleToRemove.item.toLowerCase().includes('comodato');
       const lineTotal = saleToRemove.qty * (isZeroVal ? 0 : saleToRemove.value);
-      const method = saleToRemove.paymentMethod || 'dinheiro';
       if (lineTotal > 0) {
-        if (method === 'dinheiro') {
-          setPayments(prev => ({ ...prev, dinheiro: Math.max(0, prev.dinheiro - lineTotal) }));
-        } else if (method === 'pix') {
-          setPayments(prev => ({ ...prev, pix: Math.max(0, prev.pix - lineTotal) }));
-        } else if (method === 'boleto') {
-          setPayments(prev => ({ ...prev, boleto: Math.max(0, prev.boleto - lineTotal) }));
-        } else if (method === 'cheque') {
-          setPayments(prev => ({ ...prev, cheque: Math.max(0, prev.cheque - lineTotal) }));
+        if (saleToRemove.paymentsBreakdown) {
+          const bd = saleToRemove.paymentsBreakdown;
+          setPayments(prev => ({
+            dinheiro: Math.max(0, prev.dinheiro - (bd.dinheiro || 0)),
+            pix: Math.max(0, prev.pix - (bd.pix || 0)),
+            boleto: Math.max(0, prev.boleto - (bd.boleto || 0)),
+            cheque: Math.max(0, prev.cheque - (bd.cheque || 0)),
+            outros: Math.max(0, prev.outros - (bd.outros || 0))
+          }));
         } else {
-          setPayments(prev => ({ ...prev, outros: Math.max(0, prev.outros - lineTotal) }));
+          const method = saleToRemove.paymentMethod || 'dinheiro';
+          if (method === 'dinheiro') {
+            setPayments(prev => ({ ...prev, dinheiro: Math.max(0, prev.dinheiro - lineTotal) }));
+          } else if (method === 'pix') {
+            setPayments(prev => ({ ...prev, pix: Math.max(0, prev.pix - lineTotal) }));
+          } else if (method === 'boleto') {
+            setPayments(prev => ({ ...prev, boleto: Math.max(0, prev.boleto - lineTotal) }));
+          } else if (method === 'cheque') {
+            setPayments(prev => ({ ...prev, cheque: Math.max(0, prev.cheque - lineTotal) }));
+          } else {
+            setPayments(prev => ({ ...prev, outros: Math.max(0, prev.outros - lineTotal) }));
+          }
         }
       }
     }
@@ -1744,11 +2128,39 @@ export const PrestacaoContas: React.FC = () => {
   };
 
   const handleUpdateSaleQty = (id: string, qty: number) => {
-    setSales(sales.map(s => s.id === id ? { ...s, qty: Math.max(0, qty) } : s));
+    setSales(sales.map(s => {
+      if (s.id !== id) return s;
+      const oldQty = s.qty || 1;
+      const newQty = Math.max(0, qty);
+      const ratio = oldQty > 0 ? (newQty / oldQty) : 0;
+      const bd = s.paymentsBreakdown;
+      const newBd = bd ? {
+        dinheiro: Number((bd.dinheiro * ratio).toFixed(2)),
+        pix: Number((bd.pix * ratio).toFixed(2)),
+        boleto: Number((bd.boleto * ratio).toFixed(2)),
+        cheque: Number((bd.cheque * ratio).toFixed(2)),
+        outros: Number((bd.outros * ratio).toFixed(2))
+      } : undefined;
+      return { ...s, qty: newQty, paymentsBreakdown: newBd };
+    }));
   };
 
   const handleUpdateSaleValue = (id: string, value: number) => {
-    setSales(sales.map(s => s.id === id ? { ...s, value: Math.max(0, value) } : s));
+    setSales(sales.map(s => {
+      if (s.id !== id) return s;
+      const oldValue = s.value || 1;
+      const newValue = Math.max(0, value);
+      const ratio = oldValue > 0 ? (newValue / oldValue) : 0;
+      const bd = s.paymentsBreakdown;
+      const newBd = bd ? {
+        dinheiro: Number((bd.dinheiro * ratio).toFixed(2)),
+        pix: Number((bd.pix * ratio).toFixed(2)),
+        boleto: Number((bd.boleto * ratio).toFixed(2)),
+        cheque: Number((bd.cheque * ratio).toFixed(2)),
+        outros: Number((bd.outros * ratio).toFixed(2))
+      } : undefined;
+      return { ...s, value: newValue, paymentsBreakdown: newBd };
+    }));
   };
 
   const handleUpdateExpenseValue = (id: string, value: number) => {
@@ -1785,15 +2197,20 @@ export const PrestacaoContas: React.FC = () => {
   };
 
   const handleSaveSettlement = (isDraft: boolean = false, bypassQtyCheck: boolean = false) => {
+    if (isReadOnly) return;
     if (!selectedMovement) return;
     if (!isDraft && !dateArrival) {
       setFormError('A data de chegada do motorista é obrigatória.');
       return;
     }
+    if (!isDraft && !cidade.trim()) {
+      setFormError('Por favor, selecione pelo menos uma cidade para a viagem.');
+      return;
+    }
 
     if (!isDraft && !bypassQtyCheck) {
       const enteredWaterQty = sales
-        .filter(s => s.item.toLowerCase().includes('água') || s.item.toLowerCase().includes('agua') || s.item.toLowerCase().includes('bonifica'))
+        .filter(s => (s.item.toLowerCase().includes('água') || s.item.toLowerCase().includes('agua') || s.item.toLowerCase().includes('bonifica')) && !isDisposableProduct(s.item))
         .reduce((sum, s) => sum + s.qty, 0);
       const enteredVasilhameQty = sales
         .filter(s => s.item.toLowerCase().includes('vasilhame') && !s.item.toLowerCase().includes('retorno'))
@@ -1829,6 +2246,7 @@ export const PrestacaoContas: React.FC = () => {
       dateExit: selectedMovement.exitTimestamp || selectedMovement.entryTimestamp || selectedMovement.timestamp, // default to exit or entry or timestamp
       dateArrival: dateArrival,
       sales: sales,
+      detailedSales: detailedSales,
       expenses: expenses,
       suprimentos: suprimentos,
       payments: payments,
@@ -1839,6 +2257,7 @@ export const PrestacaoContas: React.FC = () => {
       },
       observation: observation,
       commissionPercent: commissionPercent,
+      cidade: cidade.trim(),
       
       // Totals
       totalSales: totalSalesAmount,
@@ -1876,6 +2295,19 @@ export const PrestacaoContas: React.FC = () => {
       addDriverSettlement(newSettlement);
     }
 
+    if (!isDraft) {
+      const loadsToFinalize = (driverTripLoads || []).filter(t => 
+        (t.gateMovementId === selectedMovement.id) ||
+        (t.driverName?.toLowerCase() === selectedMovement.driver?.toLowerCase() && t.vehiclePlate?.toLowerCase() === selectedMovement.plate?.toLowerCase() && t.status === 'em_viagem')
+      );
+      loadsToFinalize.forEach(load => {
+        updateDriverTripLoad(load.id, {
+          status: 'finalizada',
+          currentTruckStock: 0
+        });
+      });
+    }
+
     // Only reconcile with PIX if we are NOT in draft and have selected transaction IDs
     if (!isDraft && selectedPixTxIds.length > 0) {
       reconcileDriverSettlementWithPix(settlementId, selectedPixTxIds);
@@ -1887,10 +2319,77 @@ export const PrestacaoContas: React.FC = () => {
     setActiveSubTab(isDraft ? 'pending_movements' : 'history');
   };
 
-  // Parse simulated or real Bank file (OFX, CSV or TXT)
+  // Parse simulated or real Bank file (OFX only)
   const handleBankFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    // Check file extension - only allow OFX
+    const fileExtension = file.name.split('.').pop()?.toLowerCase();
+    if (fileExtension !== 'ofx') {
+      setImportErrorMessage(`O arquivo "${file.name}" não é um arquivo OFX válido. Apenas arquivos no formato .ofx são aceitos.`);
+      setImportSuccessMessage('');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      setTimeout(() => {
+        setImportErrorMessage('');
+      }, 8000);
+      return;
+    }
+
+    const detectInstitutionFromContent = (text: string, filename: string): string => {
+      const upperText = text.toUpperCase();
+      const upperFilename = filename.toUpperCase();
+
+      if (
+        upperText.includes('BANCO DO BRASIL') || 
+        upperText.includes('BANKID>001') || 
+        upperText.includes('ORG>BB') ||
+        upperFilename.includes('BANCO DO BRASIL') ||
+        upperFilename.includes('BANCO_DO_BRASIL') ||
+        upperFilename.includes(' BB ') ||
+        upperFilename.includes('_BB_') ||
+        upperFilename.startsWith('BB')
+      ) {
+        return 'Banco do Brasil';
+      }
+
+      if (
+        upperText.includes('CAIXA ECONOMICA') || 
+        upperText.includes('CAIXA ECONÔMICA') || 
+        upperText.includes('BANKID>104') || 
+        upperText.includes('ORG>CEF') ||
+        upperText.includes('ORG>CAIXA') ||
+        upperFilename.includes('CAIXA') ||
+        upperFilename.includes('CEF') ||
+        upperFilename.includes('CEE')
+      ) {
+        return 'Caixa Econômica';
+      }
+
+      if (
+        upperText.includes('BRADESCO') || 
+        upperText.includes('BANKID>237') || 
+        upperFilename.includes('BRADESCO') ||
+        upperFilename.includes('BRAD')
+      ) {
+        return 'Bradesco';
+      }
+
+      if (upperText.includes('ITAU') || upperText.includes('ITAÚ') || upperFilename.includes('ITAU') || upperFilename.includes('ITAÚ')) {
+        return 'Itaú';
+      }
+      if (upperText.includes('SANTANDER') || upperFilename.includes('SANTANDER')) {
+        return 'Santander';
+      }
+      if (upperText.includes('SICOOB') || upperFilename.includes('SICOOB')) {
+        return 'Sicoob';
+      }
+      if (upperText.includes('SICREDI') || upperFilename.includes('SICREDI')) {
+        return 'Sicredi';
+      }
+
+      return 'Outra / Não Identificada';
+    };
 
     const reader = new FileReader();
     reader.onload = (event) => {
@@ -1902,94 +2401,142 @@ export const PrestacaoContas: React.FC = () => {
         if (text.toUpperCase().includes('<OFX>') || text.toUpperCase().includes('<STMTTRN>')) {
           parsedTransactions = parseOFX(text, userUnit);
         } else {
-          parsedTransactions = parseCSVOrTXT(text, userUnit);
+          setImportErrorMessage(`O arquivo "${file.name}" não parece conter um formato de extrato OFX válido (faltando tags <OFX> ou <STMTTRN>).`);
+          setImportSuccessMessage('');
+          if (fileInputRef.current) fileInputRef.current.value = '';
+          setTimeout(() => {
+            setImportErrorMessage('');
+          }, 8000);
+          return;
         }
       } catch (err) {
         console.error("Erro ao analisar arquivo bancário:", err);
       }
 
-      if (parsedTransactions.length > 0) {
-        importBankTransactions(parsedTransactions);
-        setImportSuccessMessage(`Importação concluída! ${parsedTransactions.length} transações recebidas (PIX/Transferências) importadas com sucesso.`);
-      } else {
-        // Fallback ONLY if parsing really failed to produce any results AND it wasn't a valid format
-        const mockTxs: BankTransaction[] = [
-          {
-            id: 'tx-sim-1',
-            date: new Date().toISOString().split('T')[0],
-            description: 'PIX RECEBIDO - CARLOS SILVA',
-            amount: 1450.00,
-            documentRef: 'E0018374920260624',
-            isReconciled: false,
-            importedAt: new Date().toISOString(),
-            unit: userUnit
-          },
-          {
-            id: 'tx-sim-2',
-            date: new Date().toISOString().split('T')[0],
-            description: 'RECEBIMENTO PIX - POSTO ABC',
-            amount: 850.50,
-            documentRef: 'E0018374920260625',
-            isReconciled: false,
-            importedAt: new Date().toISOString(),
-            unit: userUnit
-          },
-          {
-            id: 'tx-sim-3',
-            date: new Date().toISOString().split('T')[0],
-            description: 'PIX COBRANCA CLIENTE XPTO',
-            amount: 3200.00,
-            documentRef: 'E0018374920260626',
-            isReconciled: false,
-            importedAt: new Date().toISOString(),
-            unit: userUnit
-          }
-        ];
-        importBankTransactions(mockTxs);
-        setImportSuccessMessage(`Nenhuma transação encontrada no arquivo. Importando transações de teste para demonstração.`);
+      const fileId = 'file-' + Date.now() + '-' + Math.random().toString(36).substring(2, 7);
+
+      let inst = selectedImportInstitution;
+      if (inst === 'auto') {
+        inst = detectInstitutionFromContent(text, file.name);
+      } else if (inst === 'outro') {
+        inst = customImportInstitution.trim() || 'Outra';
       }
-      setTimeout(() => setImportSuccessMessage(''), 6000);
+
+      if (parsedTransactions.length > 0) {
+        const enriched = parsedTransactions.map(tx => ({
+          ...tx,
+          importedFileId: fileId,
+          importFilename: file.name,
+          institution: inst
+        }));
+        importBankTransactions(enriched);
+        setImportSuccessMessage(`Importação concluída! ${enriched.length} transações recebidas (PIX/Transferências) do arquivo "${file.name}" de [${inst}] importadas com sucesso.`);
+        setImportErrorMessage('');
+      } else {
+        setImportErrorMessage(`Nenhuma transação PIX ou recebimento válido foi encontrado no arquivo "${file.name}". Verifique se o arquivo está no formato esperado.`);
+        setImportSuccessMessage('');
+      }
+      setTimeout(() => {
+        setImportSuccessMessage('');
+        setImportErrorMessage('');
+      }, 8000);
     };
     reader.readAsText(file);
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  // Filter bank transactions
-  const filteredBankTxs = bankTransactions.filter(tx => {
-    const query = searchBankQuery.toLowerCase().trim();
-    if (!query) {
+  // Group bank transactions by imported files
+  const importedFiles = React.useMemo(() => {
+    const filesMap = new Map<string, { id: string; name: string; count: number; date: string }>();
+    bankTransactions.forEach(tx => {
+      if (tx.importedFileId) {
+        const existing = filesMap.get(tx.importedFileId);
+        if (existing) {
+          existing.count++;
+        } else {
+          filesMap.set(tx.importedFileId, {
+            id: tx.importedFileId,
+            name: tx.importFilename || 'Extrato sem Nome',
+            count: 1,
+            date: tx.importedAt
+          });
+        }
+      }
+    });
+    return Array.from(filesMap.values()).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+  }, [bankTransactions]);
+
+  // Filter and sort bank transactions (from newest to oldest)
+  const filteredBankTxs = React.useMemo(() => {
+    const filtered = bankTransactions.filter(tx => {
+      // 1. Filter by institution first
+      if (filterBankInstitution !== 'all') {
+        const txInst = tx.institution || 'Outra / Não Identificada';
+        if (txInst !== filterBankInstitution) {
+          return false;
+        }
+      }
+
+      const query = searchBankQuery.toLowerCase().trim();
+      if (!query) {
+        if (filterBankReconciliation === 'reconciled') {
+          return tx.isReconciled;
+        } else if (filterBankReconciliation === 'pending') {
+          return !tx.isReconciled;
+        } else if (filterBankReconciliation === 'refunds') {
+          return !!tx.isRefund;
+        }
+        return true;
+      }
+
+      const matchesDesc = tx.description.toLowerCase().includes(query);
+      const matchesAmount = tx.amount.toString().includes(query) || 
+                            tx.amount.toFixed(2).includes(query) ||
+                            tx.amount.toFixed(2).replace('.', ',').includes(query);
+      const matchesRef = (tx.documentRef || '').toLowerCase().includes(query);
+      const normalizedInst = (tx.institution || '').toLowerCase();
+      const matchesInst = normalizedInst.includes(query) ||
+                          (normalizedInst.includes('banco do brasil') && query === 'bb') ||
+                          (normalizedInst.includes('caixa') && query === 'cef');
+      const matchesFilename = (tx.importFilename || '').toLowerCase().includes(query);
+      const matchesDate = tx.date.includes(query) || (() => {
+        const [y, m, d] = tx.date.split('-');
+        if (y && m && d) {
+          const brDate = `${d}/${m}/${y}`;
+          const brDateShort = `${d}/${m}`;
+          return brDate.includes(query) || brDateShort.includes(query);
+        }
+        return false;
+      })();
+
+      const matchesSearch = matchesDesc || matchesAmount || matchesRef || matchesInst || matchesFilename || matchesDate;
+      
       if (filterBankReconciliation === 'reconciled') {
-        return tx.isReconciled;
+        return matchesSearch && tx.isReconciled;
       } else if (filterBankReconciliation === 'pending') {
-        return !tx.isReconciled;
+        return matchesSearch && !tx.isReconciled;
+      } else if (filterBankReconciliation === 'refunds') {
+        return matchesSearch && !!tx.isRefund;
       }
-      return true;
-    }
+      return matchesSearch;
+    });
 
-    const matchesDesc = tx.description.toLowerCase().includes(query);
-    const matchesAmount = tx.amount.toString().includes(query) || 
-                          tx.amount.toFixed(2).includes(query) ||
-                          tx.amount.toFixed(2).replace('.', ',').includes(query);
-    const matchesRef = (tx.documentRef || '').toLowerCase().includes(query);
-    const matchesDate = tx.date.includes(query) || (() => {
-      const [y, m, d] = tx.date.split('-');
-      if (y && m && d) {
-        const brDate = `${d}/${m}/${y}`;
-        const brDateShort = `${d}/${m}`;
-        return brDate.includes(query) || brDateShort.includes(query);
+    // Sort by date from newest to oldest (descending)
+    return [...filtered].sort((a, b) => {
+      const dateA = new Date(a.date).getTime() || 0;
+      const dateB = new Date(b.date).getTime() || 0;
+      if (dateA !== dateB) {
+        return dateB - dateA;
       }
-      return false;
-    })();
-
-    const matchesSearch = matchesDesc || matchesAmount || matchesRef || matchesDate;
-    
-    if (filterBankReconciliation === 'reconciled') {
-      return matchesSearch && tx.isReconciled;
-    } else if (filterBankReconciliation === 'pending') {
-      return matchesSearch && !tx.isReconciled;
-    }
-    return matchesSearch;
-  });
+      // If dates are identical, sort by creation time (importedAt)
+      const timeA = a.importedAt ? new Date(a.importedAt).getTime() : 0;
+      const timeB = b.importedAt ? new Date(b.importedAt).getTime() : 0;
+      if (timeA !== timeB) {
+        return timeB - timeA;
+      }
+      return b.id.localeCompare(a.id);
+    });
+  }, [bankTransactions, filterBankInstitution, filterBankReconciliation, searchBankQuery]);
 
   const handleOpenReconcile = (settlement: DriverSettlement) => {
     setReconcilingSettlement(settlement);
@@ -2279,6 +2826,7 @@ export const PrestacaoContas: React.FC = () => {
               padding-bottom: 1px;
             }
             .grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 8px; }
+            .grid-5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 8px; }
             .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 8px; }
             .info-label { font-size: 7.5px; text-transform: uppercase; color: #64748b; font-weight: bold; letter-spacing: 0.3px; }
             .info-value { font-size: 10px; font-weight: 700; color: #0f172a; }
@@ -2301,7 +2849,7 @@ export const PrestacaoContas: React.FC = () => {
             <p class="subtitle">ID Acerto: ${settlement.id} | Data: ${settlement.dateSettlement} | Terrasul envasadora de bebidas Ltda.</p>
           </div>
           
-          <div class="grid-4">
+          <div class="grid-5">
             <div>
               <div class="info-label">Motorista</div>
               <div class="info-value">${settlement.driverName}</div>
@@ -2309,6 +2857,10 @@ export const PrestacaoContas: React.FC = () => {
             <div>
               <div class="info-label">Veículo / Placa</div>
               <div class="info-value">${settlement.plate}</div>
+            </div>
+            <div>
+              <div class="info-label">Cidade da Viagem</div>
+              <div class="info-value" style="color: #4f46e5;">${settlement.cidade || 'Não informada'}</div>
             </div>
             <div>
               <div class="info-label">Data Saída</div>
@@ -2665,6 +3217,10 @@ export const PrestacaoContas: React.FC = () => {
                   <span class="info-value">${settlement.plate}</span>
                 </div>
                 <div class="info-row">
+                  <span class="info-label">Cidade:</span>
+                  <span class="info-value">${settlement.cidade || 'Não informada'}</span>
+                </div>
+                <div class="info-row">
                   <span class="info-label">ID do Acerto:</span>
                   <span class="info-value">${settlement.id}</span>
                 </div>
@@ -2801,16 +3357,21 @@ export const PrestacaoContas: React.FC = () => {
             <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <Truck size={16} className="text-slate-600" />
-                <h2 className="text-xs font-bold text-slate-800 uppercase tracking-tight">Veículos em Viagem (Adiantamentos de Saída)</h2>
+                <h2 className="text-xs font-bold text-slate-800 uppercase tracking-tight">Adiantamento para Motoristas (Carregados e em Viagem)</h2>
               </div>
-              <span className="text-[10px] font-bold uppercase tracking-wider bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full">
-                {activeTripsOnRoad.length} veículos em viagem
-              </span>
+              <div className="flex gap-2">
+                <span className="text-[10px] font-bold uppercase tracking-wider bg-indigo-50 text-indigo-700 px-2.5 py-0.5 rounded-full border border-indigo-100 animate-fadeIn">
+                  {activeTripsOnRoad.filter(m => m.type === 'entrada').length} no pátio carregados
+                </span>
+                <span className="text-[10px] font-bold uppercase tracking-wider bg-amber-50 text-amber-700 px-2.5 py-0.5 rounded-full border border-amber-100 animate-fadeIn">
+                  {activeTripsOnRoad.filter(m => m.type === 'saida').length} em viagem
+                </span>
+              </div>
             </div>
 
             {activeTripsOnRoad.length === 0 ? (
               <div className="p-8 text-center text-slate-400 text-xs">
-                Nenhum veículo próprio ou terceirizado em viagem no momento.
+                Nenhum veículo próprio ou terceirizado carregado ou em viagem no momento.
               </div>
             ) : (
               <div className="overflow-x-auto">
@@ -2819,7 +3380,7 @@ export const PrestacaoContas: React.FC = () => {
                     <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold text-[10px] uppercase">
                       <th className="p-4">Placa / Veículo</th>
                       <th className="p-4">Motorista</th>
-                      <th className="p-4">Saída da Empresa</th>
+                      <th className="p-4">Status / Saída</th>
                       <th className="p-4">Adiantamentos Lançados</th>
                       <th className="p-4 text-right">Ação</th>
                     </tr>
@@ -2842,8 +3403,26 @@ export const PrestacaoContas: React.FC = () => {
                           <td className="p-4">
                             <span className="font-semibold">{mov.driver}</span>
                           </td>
-                          <td className="p-4 text-slate-500">
-                            {new Date(mov.timestamp).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}
+                          <td className="p-4">
+                            {mov.type === 'entrada' ? (
+                              <div className="space-y-1">
+                                <span className="inline-flex items-center gap-1 bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded text-[9px] font-extrabold border border-indigo-100 uppercase animate-fadeIn">
+                                  📥 Carregado (No Pátio)
+                                </span>
+                                <div className="text-[10px] text-slate-400 font-normal">
+                                  Carregamento: {new Date(mov.timestamp).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="space-y-1">
+                                <span className="inline-flex items-center gap-1 bg-amber-50 text-amber-700 px-2 py-0.5 rounded text-[9px] font-extrabold border border-amber-100 uppercase animate-fadeIn">
+                                  🚚 Em Viagem
+                                </span>
+                                <div className="text-[10px] text-slate-400 font-normal">
+                                  Saída: {new Date(mov.exitTimestamp || mov.timestamp).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}
+                                </div>
+                              </div>
+                            )}
                           </td>
                           <td className="p-4">
                             {totalAdvancesVal > 0 ? (
@@ -2863,7 +3442,7 @@ export const PrestacaoContas: React.FC = () => {
                                 setCashAdvanceMovement(mov);
                                 setCashAdvanceModalOpen(true);
                               }}
-                              className="inline-flex items-center gap-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 hover:text-emerald-800 px-2.5 py-1 rounded text-[11px] font-bold transition-all border border-emerald-200"
+                              className="inline-flex items-center gap-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 hover:text-emerald-800 px-2.5 py-1 rounded text-[11px] font-bold transition-all border border-emerald-200 cursor-pointer"
                             >
                               <Coins size={12} />
                               Adiantar Caixa
@@ -3079,10 +3658,64 @@ export const PrestacaoContas: React.FC = () => {
             )}
           </div>
 
+          {/* Composição da Carga do Motorista Próprio */}
+          {selectedMovement && isProprioMovement(selectedMovement) && (
+            (() => {
+              const baseControl = selectedMovement.productionControl;
+              const returnControl = getReturnMovement(selectedMovement)?.productionControl;
+              const totalLoadedWater = baseControl?.totalCarregado ?? returnControl?.totalCarregado ?? 0;
+              const disposableLoads = (driverTripLoads || []).filter(t => 
+                t.gateMovementId === selectedMovement.id || 
+                (!t.gateMovementId && t.driverName?.toLowerCase() === selectedMovement.driver?.toLowerCase() && t.vehiclePlate?.toLowerCase() === selectedMovement.plate?.toLowerCase() && new Date(t.timestamp).getTime() >= new Date(selectedMovement.timestamp).getTime() - 120000 && new Date(t.timestamp).getTime() <= new Date(selectedMovement.timestamp).getTime() + 86400000)
+              );
+
+              const groupedDisposableMap = disposableLoads.reduce((acc, load) => {
+                const cleanName = load.productName.split('(')[0].trim();
+                const key = load.productId || cleanName.toLowerCase();
+                if (!acc[key]) {
+                  acc[key] = {
+                    id: key,
+                    productName: cleanName,
+                    initialQty: 0
+                  };
+                }
+                acc[key].initialQty += (load.initialQty || 0);
+                return acc;
+              }, {} as Record<string, { id: string; productName: string; initialQty: number }>);
+
+              const groupedDisposableList = Object.values(groupedDisposableMap);
+              
+              if (totalLoadedWater > 0 || groupedDisposableList.length > 0) {
+                return (
+                  <div className="bg-indigo-50/50 p-3 rounded-lg border border-indigo-100 mb-3 text-[10px]">
+                    <div className="font-bold text-indigo-900 uppercase mb-2 flex items-center gap-1.5">
+                      <Truck size={14} /> Composição da Carga do Motorista Próprio
+                    </div>
+                    <div className="space-y-1">
+                      {totalLoadedWater > 0 && (
+                        <div className="flex justify-between border-b border-indigo-100/50 pb-1">
+                           <span className="text-indigo-800 font-semibold">Água 20 Lts (Linha Retornável)</span>
+                           <span className="font-black text-indigo-950">{totalLoadedWater} un</span>
+                        </div>
+                      )}
+                      {groupedDisposableList.map(load => (
+                        <div key={load.id} className="flex justify-between border-b border-indigo-100/50 pb-1">
+                           <span className="text-indigo-800 font-semibold">{load.productName} (Linha Descartável)</span>
+                           <span className="font-black text-indigo-950">{load.initialQty} un</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              }
+              return null;
+            })()
+          )}
+
           {/* Real-time Launch Balance Tracker */}
           {(() => {
             const enteredWaterQty = sales
-              .filter(s => s.item.toLowerCase().includes('água') || s.item.toLowerCase().includes('agua') || s.item.toLowerCase().includes('bonifica'))
+              .filter(s => (s.item.toLowerCase().includes('água') || s.item.toLowerCase().includes('agua') || s.item.toLowerCase().includes('bonifica')) && !isDisposableProduct(s.item))
               .reduce((sum, s) => sum + s.qty, 0);
             const enteredVasilhameQty = sales
               .filter(s => s.item.toLowerCase().includes('vasilhame') && !s.item.toLowerCase().includes('retorno'))
@@ -3309,9 +3942,14 @@ export const PrestacaoContas: React.FC = () => {
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 {[
                   { type: 'agua', label: '💧 Água 20 Lts', desc: 'Garrafão cheio' },
+                  { type: 'agua_copo', label: '🥤 Copo 200ml', desc: 'Cx c/ 48un' },
+                  { type: 'garrafa510', label: '🍾 Garrafa 510ml', desc: 'Fd c/ 12un' },
+                  { type: 'garrafa15l', label: '🍾 Garrafa 1,5L', desc: 'Fd c/ 6un' },
                   { type: 'vasilhame', label: '🪣 Vasilhame', desc: 'Venda de vasilhame' },
                   { type: 'bonificacao', label: '🎁 Bonificação', desc: 'Custo zero' },
-                  { type: 'comodato', label: '🤝 Comodato', desc: 'Vasilhame emprestado' }
+                  { type: 'comodato', label: '🤝 Comodato', desc: 'Vasilhame emprestado' },
+                  { type: 'retorno', label: '🔄 Retorno Comodato', desc: 'Devolução de vasilhame' },
+                  { type: 'troca', label: '♻️ Troca Vasilhame', desc: 'Avarias por Água' }
                 ].map((prod) => (
                   <button
                     key={prod.type}
@@ -3354,25 +3992,60 @@ export const PrestacaoContas: React.FC = () => {
                 <div>
                   <label className="text-[9px] font-bold text-slate-500 uppercase block mb-1">Preço Unitário (R$)</label>
                   <input 
-                    type="number" 
-                    step="0.01" 
-                    min="0" 
+                    type="text" 
+                    inputMode="numeric"
                     required 
-                    disabled={manualSaleProductType === 'bonificacao' || manualSaleProductType === 'comodato'} 
-                    value={manualSaleProductType === 'bonificacao' || manualSaleProductType === 'comodato' ? '0' : manualSaleUnitPrice} 
+                    disabled={manualSaleProductType === 'bonificacao' || manualSaleProductType === 'comodato' || manualSaleProductType === 'retorno' || manualSaleProductType === 'troca'} 
+                    value={
+                      manualSaleProductType === 'bonificacao' || manualSaleProductType === 'comodato' || manualSaleProductType === 'retorno' || manualSaleProductType === 'troca'
+                        ? 'Grátis' 
+                        : formatBRLWithoutSymbol(Number(manualSaleUnitPrice) || 0)
+                    } 
                     onChange={e => {
-                      const val = e.target.value;
-                      setManualSaleUnitPrice(val === '' ? '' : Number(val));
+                      if (manualSaleProductType === 'bonificacao' || manualSaleProductType === 'comodato' || manualSaleProductType === 'retorno' || manualSaleProductType === 'troca') return;
+                      const parsed = parseBRLCurrency(e.target.value);
+                      setManualSaleUnitPrice(parsed);
                     }} 
                     className={`w-full text-xs p-2 border border-slate-200 rounded focus:ring-2 focus:ring-indigo-500 outline-none ${
-                      manualSaleProductType === 'bonificacao' || manualSaleProductType === 'comodato'
+                      manualSaleProductType === 'bonificacao' || manualSaleProductType === 'comodato' || manualSaleProductType === 'retorno' || manualSaleProductType === 'troca'
                         ? 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed font-medium'
                         : 'bg-white font-bold text-slate-700'
                     }`} 
-                    placeholder={manualSaleProductType === 'bonificacao' || manualSaleProductType === 'comodato' ? 'Grátis' : 'Digite o valor'}
+                    placeholder="0,00"
                   />
                 </div>
               </div>
+
+              {/* Troca / Exchange Inputs (Ratio and calculated avarias) */}
+              {manualSaleProductType === 'troca' && (
+                <div className="p-3 bg-amber-50/50 rounded-lg border border-amber-100 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-[9px] font-bold text-amber-700 uppercase block mb-1">Relação de Troca (Avarias por Água)</label>
+                    <div className="relative flex items-center">
+                      <input
+                        type="number"
+                        min="1"
+                        required
+                        value={manualExchangeRatio}
+                        onFocus={(e) => e.target.select()}
+                        onChange={e => {
+                          const val = e.target.value;
+                          setManualExchangeRatio(val === '' ? 4 : Math.max(1, parseInt(val) || 1));
+                        }}
+                        className="w-full text-xs p-2 pr-8 border border-amber-200 rounded focus:ring-2 focus:ring-amber-500 outline-none bg-white font-bold text-amber-800 text-center"
+                      />
+                      <span className="absolute right-3 text-[10px] font-bold text-amber-400 pointer-events-none">x1</span>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-[9px] font-bold text-amber-700 uppercase block mb-1">Total de Avarias Entregues pelo Cliente</label>
+                    <div className="w-full text-xs p-2 border border-amber-200 rounded bg-amber-100/50 font-black text-amber-900 flex items-center justify-between">
+                      <span>{manualExchangeAvariasQty || 0} Avarias</span>
+                      <span className="text-[9px] font-medium text-amber-600 font-sans italic">Calculado automaticamente ({manualSaleQty || 0} x {manualExchangeRatio})</span>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <div className="flex justify-end">
                 <button 
@@ -3402,7 +4075,13 @@ export const PrestacaoContas: React.FC = () => {
                       <div className="space-y-0.5">
                         <span className="font-extrabold text-slate-800">{getManualProductDisplayName(item.productType)}</span>
                         <div className="text-[10px] text-slate-400 font-semibold">
-                          {item.qty} un × R$ {item.unitPrice.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          {item.productType === 'troca' ? (
+                            <span className="text-amber-700 font-bold bg-amber-50 px-1.5 py-0.5 rounded border border-amber-100 block mt-0.5">
+                              Troca: {item.qty} Água(s) por {item.exchangeAvariasQty || (item.qty * (item.exchangeRatio || 4))} Avarias (1:{item.exchangeRatio || 4})
+                            </span>
+                          ) : (
+                            `${item.qty} un × R$ ${item.unitPrice.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+                          )}
                         </div>
                       </div>
                       <div className="flex items-center gap-3">
@@ -3477,11 +4156,11 @@ export const PrestacaoContas: React.FC = () => {
                             <div className="flex items-center gap-2">
                               <span className="w-16 font-extrabold text-[11px] text-slate-500 uppercase">Dinheiro</span>
                               <input 
-                                type="number" 
-                                step="0.01"
-                                placeholder="0.00" 
-                                value={manualPayDinheiro} 
-                                onChange={e => setManualPayDinheiro(e.target.value)} 
+                                type="text" 
+                                inputMode="numeric"
+                                placeholder="0,00" 
+                                value={formatBRLWithoutSymbol(parseFloat(manualPayDinheiro) || 0)} 
+                                onChange={e => setManualPayDinheiro(parseBRLCurrency(e.target.value).toString())} 
                                 className="flex-1 text-xs p-1.5 border border-slate-200 rounded font-bold text-slate-700 text-right bg-white focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
                               />
                               <button 
@@ -3497,11 +4176,11 @@ export const PrestacaoContas: React.FC = () => {
                             <div className="flex items-center gap-2">
                               <span className="w-16 font-extrabold text-[11px] text-slate-500 uppercase">PIX</span>
                               <input 
-                                type="number" 
-                                step="0.01"
-                                placeholder="0.00" 
-                                value={manualPayPix} 
-                                onChange={e => setManualPayPix(e.target.value)} 
+                                type="text" 
+                                inputMode="numeric"
+                                placeholder="0,00" 
+                                value={formatBRLWithoutSymbol(parseFloat(manualPayPix) || 0)} 
+                                onChange={e => setManualPayPix(parseBRLCurrency(e.target.value).toString())} 
                                 className="flex-1 text-xs p-1.5 border border-slate-200 rounded font-bold text-slate-700 text-right bg-white focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
                               />
                               <button 
@@ -3517,11 +4196,11 @@ export const PrestacaoContas: React.FC = () => {
                             <div className="flex items-center gap-2">
                               <span className="w-16 font-extrabold text-[11px] text-slate-500 uppercase">Boleto</span>
                               <input 
-                                type="number" 
-                                step="0.01"
-                                placeholder="0.00" 
-                                value={manualPayBoleto} 
-                                onChange={e => setManualPayBoleto(e.target.value)} 
+                                type="text" 
+                                inputMode="numeric"
+                                placeholder="0,00" 
+                                value={formatBRLWithoutSymbol(parseFloat(manualPayBoleto) || 0)} 
+                                onChange={e => setManualPayBoleto(parseBRLCurrency(e.target.value).toString())} 
                                 className="flex-1 text-xs p-1.5 border border-slate-200 rounded font-bold text-slate-700 text-right bg-white focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
                               />
                               <button 
@@ -3537,11 +4216,11 @@ export const PrestacaoContas: React.FC = () => {
                             <div className="flex items-center gap-2">
                               <span className="w-16 font-extrabold text-[11px] text-slate-500 uppercase">Cheque</span>
                               <input 
-                                type="number" 
-                                step="0.01"
-                                placeholder="0.00" 
-                                value={manualPayCheque} 
-                                onChange={e => setManualPayCheque(e.target.value)} 
+                                type="text" 
+                                inputMode="numeric"
+                                placeholder="0,00" 
+                                value={formatBRLWithoutSymbol(parseFloat(manualPayCheque) || 0)} 
+                                onChange={e => setManualPayCheque(parseBRLCurrency(e.target.value).toString())} 
                                 className="flex-1 text-xs p-1.5 border border-slate-200 rounded font-bold text-slate-700 text-right bg-white focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 outline-none"
                               />
                               <button 
@@ -3558,11 +4237,11 @@ export const PrestacaoContas: React.FC = () => {
                               <div className="flex items-center gap-2">
                                 <span className="w-16 font-extrabold text-[10px] text-slate-500 uppercase">A Prazo</span>
                                 <input 
-                                  type="number" 
-                                  step="0.01"
-                                  placeholder="0.00" 
-                                  value={manualPayOutros} 
-                                  onChange={e => setManualPayOutros(e.target.value)} 
+                                  type="text" 
+                                  inputMode="numeric"
+                                  placeholder="0,00" 
+                                  value={formatBRLWithoutSymbol(parseFloat(manualPayOutros) || 0)} 
+                                  onChange={e => setManualPayOutros(parseBRLCurrency(e.target.value).toString())} 
                                   className="flex-1 text-xs p-1.5 border border-slate-200 rounded font-bold text-slate-700 text-right focus:border-indigo-400 outline-none"
                                 />
                                 <button 
@@ -3796,12 +4475,11 @@ export const PrestacaoContas: React.FC = () => {
                     <div className="relative">
                       <span className="absolute left-2.5 top-2.5 text-[10px] text-slate-400 font-bold">R$</span>
                       <input
-                        type="number"
-                        min="0.01"
-                        step="0.01"
+                        type="text"
+                        inputMode="numeric"
                         required
-                        value={newExpenseValue || ''}
-                        onChange={e => setNewExpenseValue(parseFloat(e.target.value) || 0)}
+                        value={formatBRLWithoutSymbol(newExpenseValue)}
+                        onChange={e => setNewExpenseValue(parseBRLCurrency(e.target.value))}
                         className="w-full bg-white border border-slate-200 pl-7 pr-2 py-2 rounded text-xs outline-none font-bold focus:border-blue-400"
                       />
                     </div>
@@ -3835,13 +4513,11 @@ export const PrestacaoContas: React.FC = () => {
                             <div className="flex items-center justify-end">
                               <span className="text-slate-400 mr-1 text-[10px] font-bold">R$</span>
                               <input
-                                type="number"
-                                min="0"
-                                step="0.01"
+                                type="text"
+                                inputMode="numeric"
                                 className="w-24 text-right border border-slate-200 rounded p-1 bg-white outline-none focus:border-blue-400 font-bold text-xs"
-                                value={e.value || ''}
-                                placeholder="0.00"
-                                onChange={evt => handleUpdateExpenseValue(e.id, parseFloat(evt.target.value) || 0)}
+                                value={formatBRLWithoutSymbol(e.value || 0)}
+                                onChange={evt => handleUpdateExpenseValue(e.id, parseBRLCurrency(evt.target.value))}
                               />
                             </div>
                           </td>
@@ -3893,12 +4569,11 @@ export const PrestacaoContas: React.FC = () => {
                     <div className="relative">
                       <span className="absolute left-2.5 top-2.5 text-[10px] text-slate-400 font-bold">R$</span>
                       <input
-                        type="number"
-                        min="0.01"
-                        step="0.01"
+                        type="text"
+                        inputMode="numeric"
                         required
-                        value={newSuprimentoValue || ''}
-                        onChange={e => setNewSuprimentoValue(parseFloat(e.target.value) || 0)}
+                        value={formatBRLWithoutSymbol(newSuprimentoValue)}
+                        onChange={e => setNewSuprimentoValue(parseBRLCurrency(e.target.value))}
                         className="w-full bg-white border border-slate-200 pl-7 pr-2 py-2 rounded text-xs outline-none font-bold focus:border-blue-400"
                       />
                     </div>
@@ -3932,13 +4607,11 @@ export const PrestacaoContas: React.FC = () => {
                             <div className="flex items-center justify-end">
                               <span className="text-slate-400 mr-1 text-[10px] font-bold">R$</span>
                               <input
-                                type="number"
-                                min="0"
-                                step="0.01"
+                                type="text"
+                                inputMode="numeric"
                                 className="w-24 text-right border border-slate-200 rounded p-1 bg-white outline-none focus:border-blue-400 font-bold text-xs"
-                                value={s.value || ''}
-                                placeholder="0.00"
-                                onChange={evt => handleUpdateSuprimentoValue(s.id, parseFloat(evt.target.value) || 0)}
+                                value={formatBRLWithoutSymbol(s.value || 0)}
+                                onChange={evt => handleUpdateSuprimentoValue(s.id, parseBRLCurrency(evt.target.value))}
                               />
                             </div>
                           </td>
@@ -3974,56 +4647,51 @@ export const PrestacaoContas: React.FC = () => {
                   <div>
                     <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">Dinheiro (R$)</label>
                     <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={payments.dinheiro || ''}
-                      onChange={e => setPayments({ ...payments, dinheiro: parseFloat(e.target.value) || 0 })}
-                      className="w-full bg-white border border-slate-200 rounded text-xs p-2.5 outline-none font-bold text-slate-800"
+                      type="text"
+                      inputMode="numeric"
+                      value={formatBRLWithoutSymbol(payments.dinheiro)}
+                      onChange={e => setPayments({ ...payments, dinheiro: parseBRLCurrency(e.target.value) })}
+                      className="w-full bg-white border border-slate-200 rounded text-xs p-2.5 outline-none font-bold text-slate-800 focus:border-indigo-400"
                     />
                   </div>
                   <div>
                     <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">PIX (R$)</label>
                     <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={payments.pix || ''}
-                      onChange={e => setPayments({ ...payments, pix: parseFloat(e.target.value) || 0 })}
-                      className="w-full bg-white border border-slate-200 rounded text-xs p-2.5 outline-none font-bold text-slate-800 focus:border-blue-400"
+                      type="text"
+                      inputMode="numeric"
+                      value={formatBRLWithoutSymbol(payments.pix)}
+                      onChange={e => setPayments({ ...payments, pix: parseBRLCurrency(e.target.value) })}
+                      className="w-full bg-white border border-slate-200 rounded text-xs p-2.5 outline-none font-bold text-slate-800 focus:border-indigo-400"
                     />
                   </div>
                   <div>
                     <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">Boleto (R$)</label>
                     <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={payments.boleto || ''}
-                      onChange={e => setPayments({ ...payments, boleto: parseFloat(e.target.value) || 0 })}
-                      className="w-full bg-white border border-slate-200 rounded text-xs p-2.5 outline-none font-bold text-slate-800"
+                      type="text"
+                      inputMode="numeric"
+                      value={formatBRLWithoutSymbol(payments.boleto)}
+                      onChange={e => setPayments({ ...payments, boleto: parseBRLCurrency(e.target.value) })}
+                      className="w-full bg-white border border-slate-200 rounded text-xs p-2.5 outline-none font-bold text-slate-800 focus:border-indigo-400"
                     />
                   </div>
                   <div>
                     <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">Cheque (R$)</label>
                     <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={payments.cheque || ''}
-                      onChange={e => setPayments({ ...payments, cheque: parseFloat(e.target.value) || 0 })}
-                      className="w-full bg-white border border-slate-200 rounded text-xs p-2.5 outline-none font-bold text-slate-800"
+                      type="text"
+                      inputMode="numeric"
+                      value={formatBRLWithoutSymbol(payments.cheque)}
+                      onChange={e => setPayments({ ...payments, cheque: parseBRLCurrency(e.target.value) })}
+                      className="w-full bg-white border border-slate-200 rounded text-xs p-2.5 outline-none font-bold text-slate-800 focus:border-indigo-400"
                     />
                   </div>
                   <div>
                     <label className="block text-[10px] font-black text-slate-500 uppercase mb-1">Outros (R$)</label>
                     <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={payments.outros || ''}
-                      onChange={e => setPayments({ ...payments, outros: parseFloat(e.target.value) || 0 })}
-                      className="w-full bg-white border border-slate-200 rounded text-xs p-2.5 outline-none font-bold text-slate-800"
+                      type="text"
+                      inputMode="numeric"
+                      value={formatBRLWithoutSymbol(payments.outros)}
+                      onChange={e => setPayments({ ...payments, outros: parseBRLCurrency(e.target.value) })}
+                      className="w-full bg-white border border-slate-200 rounded text-xs p-2.5 outline-none font-bold text-slate-800 focus:border-indigo-400"
                     />
                   </div>
                 </div>
@@ -4133,8 +4801,8 @@ export const PrestacaoContas: React.FC = () => {
                             />
                             <span>-- Não Conciliar Agora (Deixar para conciliar depois) --</span>
                           </label>
-                          {bankTransactions
-                            .filter(tx => !tx.isReconciled)
+                          {[...bankTransactions]
+                            .filter(tx => !tx.isReconciled && !tx.isVoided && !tx.isRefund && tx.amount > 0)
                             .filter(tx => {
                               const query = searchPixInActiveSettlementQuery.toLowerCase().trim();
                               if (!query) return true;
@@ -4156,6 +4824,7 @@ export const PrestacaoContas: React.FC = () => {
 
                               return matchesDesc || matchesAmount || matchesRef || matchesDate;
                             })
+                            .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
                             .map(tx => {
                               const isChecked = selectedPixTxIds.includes(tx.id);
                               return (
@@ -4172,12 +4841,28 @@ export const PrestacaoContas: React.FC = () => {
                                     }}
                                     className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
                                   />
-                                  <span>R$ {tx.amount.toFixed(2)} - {tx.description} ({formatDateStringBR(tx.date)})</span>
+                                  <span>
+                                    R$ {tx.amount.toFixed(2)} - {tx.description} ({formatDateStringBR(tx.date)})
+                                    {(() => {
+                                      const matchingRefund = getMatchingRefund(tx);
+                                      if (matchingRefund) {
+                                        return (
+                                          <span 
+                                            className="inline-flex items-center ml-1.5 px-1.5 py-0.5 rounded text-[8px] font-black uppercase bg-rose-50 text-rose-700 border border-rose-200 animate-pulse"
+                                            title={`Atenção: Este PIX possui uma devolução de R$ -${matchingRefund.amount.toFixed(2)} pendente de inutilização no extrato.`}
+                                          >
+                                            ⚠️ DEVOLUÇÃO DETECTADA (R$ -{matchingRefund.amount.toFixed(2)})
+                                          </span>
+                                        );
+                                      }
+                                      return null;
+                                    })()}
+                                  </span>
                                 </label>
                               );
                             })}
                           {bankTransactions
-                            .filter(tx => !tx.isReconciled)
+                            .filter(tx => !tx.isReconciled && !tx.isVoided && !tx.isRefund && tx.amount > 0)
                             .filter(tx => {
                               const query = searchPixInActiveSettlementQuery.toLowerCase().trim();
                               if (!query) return true;
@@ -4260,11 +4945,10 @@ export const PrestacaoContas: React.FC = () => {
                     <div className="relative">
                       <span className="absolute left-2.5 top-2.5 text-[10px] text-slate-400 font-bold">R$</span>
                       <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        value={avariaUnitValue || ''}
-                        onChange={e => setAvariaUnitValue(parseFloat(e.target.value) || 0)}
+                        type="text"
+                        inputMode="numeric"
+                        value={formatBRLWithoutSymbol(avariaUnitValue)}
+                        onChange={e => setAvariaUnitValue(parseBRLCurrency(e.target.value))}
                         className="w-full bg-white border border-slate-200 pl-7 pr-2 py-2.5 rounded text-xs outline-none font-bold focus:border-rose-400 focus:ring-1 focus:ring-rose-400"
                         placeholder="0,00"
                       />
@@ -4274,6 +4958,81 @@ export const PrestacaoContas: React.FC = () => {
               </div>
 
 
+
+              {/* Cidade da Viagem */}
+              <div>
+                <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                  Cidade(s) da Viagem <span className="text-red-500">*</span>
+                </label>
+                <div className="space-y-2">
+                  <select
+                    value=""
+                    onChange={e => {
+                      const value = e.target.value;
+                      if (value) {
+                        const currentList = cidade ? cidade.split(', ').map(c => c.trim()).filter(Boolean) : [];
+                        if (!currentList.includes(value)) {
+                          const updated = [...currentList, value];
+                          setCidade(updated.join(', '));
+                        }
+                      }
+                    }}
+                    className="w-full bg-white border border-slate-200 rounded text-xs p-2.5 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 font-bold text-slate-800"
+                  >
+                    <option value="">-- Adicione uma ou mais Cidades --</option>
+                    {[...(registeredCities || [])]
+                      .sort((a, b) => a.name.localeCompare(b.name))
+                      .filter(city => {
+                        const currentList = cidade ? cidade.split(', ').map(c => c.trim()).filter(Boolean) : [];
+                        return !currentList.includes(city.name);
+                      })
+                      .map(city => (
+                        <option key={city.id} value={city.name}>
+                          {city.name} {city.uf ? `(${city.uf})` : ''}
+                        </option>
+                      ))}
+                  </select>
+
+                  {/* Selected cities badges */}
+                  {(() => {
+                    const currentList = cidade ? cidade.split(', ').map(c => c.trim()).filter(Boolean) : [];
+                    if (currentList.length === 0) {
+                      return (
+                        <p className="text-[10px] text-amber-600 font-bold bg-amber-50 border border-amber-100 p-2 rounded-lg">
+                          ⚠️ Nenhuma cidade selecionada. Por favor, adicione pelo menos uma cidade.
+                        </p>
+                      );
+                    }
+                    return (
+                      <div className="flex flex-wrap gap-1.5 p-2 bg-slate-50 rounded-lg border border-slate-150 min-h-[36px] items-center">
+                        {currentList.map((city, idx) => (
+                          <span
+                            key={idx}
+                            className="inline-flex items-center gap-1 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 font-black text-[10px] uppercase px-2.5 py-1 rounded-md shadow-3xs transition-all duration-100 animate-in fade-in zoom-in-95 duration-150"
+                          >
+                            <span>🏙️ {city}</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const updated = currentList.filter(c => c !== city);
+                                setCidade(updated.join(', '));
+                              }}
+                              className="text-indigo-400 hover:text-indigo-600 font-black cursor-pointer text-xs ml-1 flex items-center justify-center w-3 h-3 rounded-full hover:bg-indigo-200/50"
+                              title="Remover"
+                            >
+                              ×
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                <p className="text-[10px] text-slate-400 mt-1">
+                  Gerencie as cidades disponíveis no menu de <strong>Configurações (Painel de Apoio)</strong>.
+                </p>
+              </div>
 
               {/* Observation */}
               <div>
@@ -4294,12 +5053,19 @@ export const PrestacaoContas: React.FC = () => {
             {/* Driver Mobile Entries Card */}
             {resolvedProductionControl && (
               <div className="bg-slate-50 rounded-xl border border-slate-200 p-4 space-y-3">
-                <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                <div className="flex items-center justify-between border-b border-slate-200 pb-2 gap-2">
                   <h4 className="text-[11px] font-black text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
                     <Smartphone size={14} className="text-blue-600 animate-pulse" />
                     Lançamentos do Motorista (App)
                   </h4>
-                  <span className="text-[9px] bg-blue-100 text-blue-800 font-bold px-1.5 py-0.5 rounded-full uppercase tracking-wider">Roteiro Mobile</span>
+                  <button
+                    type="button"
+                    onClick={() => setIsEditingMobileData(true)}
+                    className="text-[10px] bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 font-bold px-2 py-1 rounded transition cursor-pointer flex items-center gap-1 shrink-0 shadow-2xs hover:shadow-xs active:scale-95"
+                  >
+                    <Edit size={10} />
+                    <span>Editar Lançamentos</span>
+                  </button>
                 </div>
                 
                 {/* Sales list from mobile */}
@@ -4360,7 +5126,7 @@ export const PrestacaoContas: React.FC = () => {
                 </div>
 
                 {/* Logistics Operations */}
-                <div className="grid grid-cols-3 gap-1.5 border-t border-b border-slate-200/60 py-2.5 text-center bg-white/40 rounded-lg px-1">
+                <div className="grid grid-cols-4 gap-1.5 border-t border-b border-slate-200/60 py-2.5 text-center bg-white/40 rounded-lg px-1">
                   <div className="bg-white p-1 rounded border border-slate-150 flex flex-col justify-center shadow-3xs">
                     <span className="block text-[7.5px] font-extrabold text-slate-400 uppercase leading-none mb-1">Bonificação</span>
                     <strong className="text-slate-700 text-[11px] font-mono leading-none">{resolvedProductionControl.mobileBonifications || 0} un</strong>
@@ -4372,6 +5138,10 @@ export const PrestacaoContas: React.FC = () => {
                   <div className="bg-white p-1 rounded border border-slate-150 flex flex-col justify-center shadow-3xs">
                     <span className="block text-[7.5px] font-extrabold text-slate-400 uppercase leading-none mb-1 font-mono">Com. Retirado</span>
                     <strong className="text-emerald-600 text-[11px] font-mono leading-none">{resolvedProductionControl.mobileComodatoReturn || 0} un</strong>
+                  </div>
+                  <div className="bg-white p-1 rounded border border-slate-150 flex flex-col justify-center shadow-3xs">
+                    <span className="block text-[7.5px] font-extrabold text-slate-400 uppercase leading-none mb-1 font-mono">Trocas</span>
+                    <strong className="text-blue-600 text-[11px] font-mono leading-none">{resolvedProductionControl.mobileExchanges || 0} un</strong>
                   </div>
                 </div>
 
@@ -4471,7 +5241,19 @@ export const PrestacaoContas: React.FC = () => {
                   <h4 className="text-[10px] font-black text-slate-600 uppercase tracking-widest border-b border-slate-200 pb-1.5">Memória de Cálculo de Comissão</h4>
                   
                   <div className="flex justify-between text-[11px] font-bold text-slate-600">
-                    <span>Comissão Bruta ({commissionPercent}%):</span>
+                    <span>Comissão Vendas de Água Galão ({commissionPercent}%):</span>
+                    <span>R$ {galaoCommission.toFixed(2)}</span>
+                  </div>
+
+                  {copoSalesAmount > 0 && (
+                    <div className="flex justify-between text-[11px] font-bold text-blue-700 bg-blue-50/60 p-1.5 rounded border border-blue-100">
+                      <span>(+) Comissão Copo 200ml Descartável (1,5%):</span>
+                      <span>R$ {copoCommission.toFixed(2)}</span>
+                    </div>
+                  )}
+
+                  <div className="flex justify-between text-[11px] font-black text-slate-700 border-t border-slate-200/50 pt-1">
+                    <span>Subtotal Comissão Bruta:</span>
                     <span>R$ {basicCommission.toFixed(2)}</span>
                   </div>
 
@@ -4514,6 +5296,449 @@ export const PrestacaoContas: React.FC = () => {
             </div>
           </div>
 
+        </div>
+      )}
+
+      {/* MODAL: EDIT DRIVER LAUNCHED LOGS */}
+      {isEditingMobileData && selectedMovement && (
+        <div className="fixed inset-0 z-50 overflow-y-auto flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-4xl w-full flex flex-col max-h-[85vh] animate-in fade-in zoom-in duration-150">
+            {/* Header */}
+            <div className="p-4 border-b border-slate-150 flex items-center justify-between bg-slate-50 rounded-t-2xl">
+              <div className="flex items-center gap-2">
+                <Smartphone className="text-indigo-600 animate-bounce" size={20} />
+                <div>
+                  <h3 className="font-extrabold text-slate-800 text-sm">Editar Lançamentos Originais do Motorista</h3>
+                  <p className="text-[10px] text-slate-500 font-medium">Corrija os lançamentos enviados no aplicativo para esta viagem</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsEditingMobileData(false)}
+                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100 transition cursor-pointer"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Tabs */}
+            <div className="flex border-b border-slate-150 bg-slate-50/50">
+              <button
+                type="button"
+                onClick={() => setEditingMobileTab('sales')}
+                className={`flex-1 py-3 text-center text-xs font-bold border-b-2 transition cursor-pointer ${
+                  editingMobileTab === 'sales'
+                    ? 'border-indigo-600 text-indigo-700 bg-white'
+                    : 'border-transparent text-slate-500 hover:text-slate-700 hover:bg-slate-100/50'
+                }`}
+              >
+                Vendas do Roteiro ({selectedMovement.productionControl?.mobileSales?.length || 0})
+              </button>
+              <button
+                type="button"
+                onClick={() => setEditingMobileTab('expenses')}
+                className={`flex-1 py-3 text-center text-xs font-bold border-b-2 transition cursor-pointer ${
+                  editingMobileTab === 'expenses'
+                    ? 'border-indigo-600 text-indigo-700 bg-white'
+                    : 'border-transparent text-slate-500 hover:text-slate-700 hover:bg-slate-100/50'
+                }`}
+              >
+                Despesas de Viagem ({selectedMovement.productionControl?.mobileExpenses?.length || 0})
+              </button>
+            </div>
+
+            {/* Content Area */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              {editingMobileTab === 'sales' ? (
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center pb-2 border-b border-slate-100">
+                    <span className="text-[11px] font-bold text-slate-500 uppercase">Tabela de Vendas Registradas</span>
+                  </div>
+
+                  {(!selectedMovement.productionControl?.mobileSales || selectedMovement.productionControl.mobileSales.length === 0) ? (
+                    <div className="text-center py-8 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50/50">
+                      <p className="text-xs text-slate-500 italic">Nenhuma venda registrada pelo motorista para esta viagem.</p>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto border border-slate-150 rounded-xl shadow-3xs bg-white">
+                      <table className="w-full text-left border-collapse text-[11px]">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-150 font-bold text-slate-600 uppercase tracking-wider text-[10px]">
+                            <th className="p-3">Cliente</th>
+                            <th className="p-3">Produto/Descrição</th>
+                            <th className="p-3 w-20 text-center">Qtd</th>
+                            <th className="p-3 w-28 text-center">Preço Unit. (R$)</th>
+                            <th className="p-3 w-28 text-center">Total (R$)</th>
+                            <th className="p-3 w-56 text-center">F. Pagamento</th>
+                            <th className="p-3 w-12 text-center"></th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 text-slate-700">
+                          {selectedMovement.productionControl.mobileSales.map((s) => (
+                            <tr key={s.id} className="hover:bg-slate-50/40">
+                              <td className="p-2">
+                                <div className="flex flex-col gap-1">
+                                  <input
+                                    type="text"
+                                    value={s.clientName || ''}
+                                    onChange={(e) => {
+                                      const newClient = e.target.value;
+                                      const prodPart = cleanItemDisplay(s.item, s.clientName || '');
+                                      const updated = selectedMovement.productionControl!.mobileSales!.map(item =>
+                                        item.id === s.id ? { 
+                                          ...item, 
+                                          clientName: newClient,
+                                          item: newClient ? `${newClient} - ${prodPart}` : prodPart
+                                        } : item
+                                      );
+                                      handleSyncMobileData(updated, selectedMovement.productionControl!.mobileExpenses || []);
+                                    }}
+                                    className="w-full bg-slate-50 hover:bg-slate-100 focus:bg-white border border-slate-200 hover:border-slate-300 focus:border-indigo-400 rounded px-2 py-1 outline-none font-medium text-xs transition"
+                                  />
+                                </div>
+                              </td>
+                              <td className="p-2">
+                                <input
+                                  type="text"
+                                  value={cleanItemDisplay(s.item, s.clientName || '')}
+                                  onChange={(e) => {
+                                    const newProd = e.target.value;
+                                    const clientPart = s.clientName || '';
+                                    const updated = selectedMovement.productionControl!.mobileSales!.map(item =>
+                                      item.id === s.id ? { 
+                                        ...item, 
+                                        item: clientPart ? `${clientPart} - ${newProd}` : newProd
+                                      } : item
+                                    );
+                                    handleSyncMobileData(updated, selectedMovement.productionControl!.mobileExpenses || []);
+                                  }}
+                                  className="w-full bg-slate-50 hover:bg-slate-100 focus:bg-white border border-slate-200 hover:border-slate-300 focus:border-indigo-400 rounded px-2 py-1 outline-none font-medium text-xs transition"
+                                />
+                              </td>
+                              <td className="p-2 text-center">
+                                <input
+                                  type="number"
+                                  min="1"
+                                  value={s.qty}
+                                  onChange={(e) => {
+                                    const val = parseInt(e.target.value) || 0;
+                                    const updated = selectedMovement.productionControl!.mobileSales!.map(item =>
+                                      item.id === s.id ? { ...item, qty: val } : item
+                                    );
+                                    handleSyncMobileData(updated, selectedMovement.productionControl!.mobileExpenses || []);
+                                  }}
+                                  className="w-16 bg-slate-50 hover:bg-slate-100 focus:bg-white border border-slate-200 hover:border-slate-300 focus:border-indigo-400 rounded px-1.5 py-1 text-center outline-none font-bold font-mono text-xs transition"
+                                />
+                              </td>
+                              <td className="p-2 text-center">
+                                <input
+                                  type="text"
+                                  inputMode="numeric"
+                                  value={formatBRLWithoutSymbol(s.value)}
+                                  onChange={(e) => {
+                                    const val = parseBRLCurrency(e.target.value);
+                                    const updated = selectedMovement.productionControl!.mobileSales!.map(item =>
+                                      item.id === s.id ? { ...item, value: val } : item
+                                    );
+                                    handleSyncMobileData(updated, selectedMovement.productionControl!.mobileExpenses || []);
+                                  }}
+                                  className="w-24 bg-slate-50 hover:bg-slate-100 focus:bg-white border border-slate-200 hover:border-slate-300 focus:border-indigo-400 rounded px-1.5 py-1 text-right outline-none font-bold font-mono text-xs transition"
+                                />
+                              </td>
+                              <td className="p-2 text-center font-bold font-mono text-slate-800 bg-slate-50/50">
+                                R$ {((s.qty || 0) * (s.value || 0)).toFixed(2)}
+                              </td>
+                              <td className="p-2 text-center">
+                                <div className="space-y-1 text-left">
+                                  <select
+                                    value={
+                                      s.paymentMethod === 'misto' || 
+                                      Object.values(s.paymentsBreakdown || {}).filter(v => (v || 0) > 0).length > 1
+                                        ? 'misto'
+                                        : s.paymentMethod || 'dinheiro'
+                                    }
+                                    onChange={(e) => {
+                                      const val = e.target.value;
+                                      const total = s.qty * s.value;
+                                      const updated = selectedMovement.productionControl!.mobileSales!.map(item => {
+                                        if (item.id === s.id) {
+                                          const newBreakdown = { dinheiro: 0, pix: 0, boleto: 0, cheque: 0, outros: 0 };
+                                          if (val === 'dinheiro') newBreakdown.dinheiro = total;
+                                          else if (val === 'pix') newBreakdown.pix = total;
+                                          else if (val === 'boleto') newBreakdown.boleto = total;
+                                          else if (val === 'cheque') newBreakdown.cheque = total;
+                                          else if (val === 'outros') newBreakdown.outros = total;
+                                          else {
+                                            return {
+                                              ...item,
+                                              paymentMethod: 'misto',
+                                              paymentsBreakdown: item.paymentsBreakdown || { dinheiro: total, pix: 0, boleto: 0, cheque: 0, outros: 0 }
+                                            };
+                                          }
+ 
+                                          return { 
+                                            ...item, 
+                                            paymentMethod: val,
+                                            paymentsBreakdown: newBreakdown 
+                                          };
+                                        }
+                                        return item;
+                                      });
+                                      handleSyncMobileData(updated, selectedMovement.productionControl!.mobileExpenses || []);
+                                    }}
+                                    className="w-full bg-slate-50 border border-slate-200 rounded px-1.5 py-1 text-xs outline-none font-bold text-slate-700 focus:border-indigo-400 transition"
+                                  >
+                                    <option value="dinheiro">💵 Dinheiro</option>
+                                    <option value="pix">⚡ PIX</option>
+                                    <option value="boleto">📄 Boleto</option>
+                                    <option value="cheque">✍️ Cheque</option>
+                                    <option value="outros">⏳ A Prazo</option>
+                                    <option value="misto">🎨 Misto (Múltiplos)</option>
+                                  </select>
+
+                                  {(s.paymentMethod === 'misto' || Object.values(s.paymentsBreakdown || {}).filter(v => (v || 0) > 0).length > 1) && (
+                                    <div className="bg-slate-50 p-1.5 rounded border border-slate-150 space-y-1 text-left w-full">
+                                      <div className="grid grid-cols-2 gap-1 text-[9px] font-semibold text-slate-600">
+                                        <div className="flex items-center gap-0.5 justify-between">
+                                          <span>💵 Din:</span>
+                                          <input
+                                            type="number"
+                                            step="0.01"
+                                            value={s.paymentsBreakdown?.dinheiro || 0}
+                                            onChange={(e) => {
+                                              const val = parseFloat(e.target.value) || 0;
+                                              const updated = selectedMovement.productionControl!.mobileSales!.map(item => {
+                                                if (item.id === s.id) {
+                                                  const breakdown = { ...item.paymentsBreakdown, dinheiro: val };
+                                                  return { ...item, paymentsBreakdown: breakdown, paymentMethod: 'misto' };
+                                                }
+                                                return item;
+                                              });
+                                              handleSyncMobileData(updated, selectedMovement.productionControl!.mobileExpenses || []);
+                                            }}
+                                            className="w-14 bg-white border border-slate-200 rounded px-0.5 text-center font-mono text-[9px]"
+                                          />
+                                        </div>
+                                        <div className="flex items-center gap-0.5 justify-between">
+                                          <span>⚡ PIX:</span>
+                                          <input
+                                            type="number"
+                                            step="0.01"
+                                            value={s.paymentsBreakdown?.pix || 0}
+                                            onChange={(e) => {
+                                              const val = parseFloat(e.target.value) || 0;
+                                              const updated = selectedMovement.productionControl!.mobileSales!.map(item => {
+                                                if (item.id === s.id) {
+                                                  const breakdown = { ...item.paymentsBreakdown, pix: val };
+                                                  return { ...item, paymentsBreakdown: breakdown, paymentMethod: 'misto' };
+                                                }
+                                                return item;
+                                              });
+                                              handleSyncMobileData(updated, selectedMovement.productionControl!.mobileExpenses || []);
+                                            }}
+                                            className="w-14 bg-white border border-slate-200 rounded px-0.5 text-center font-mono text-[9px]"
+                                          />
+                                        </div>
+                                        <div className="flex items-center gap-0.5 justify-between">
+                                          <span>📄 Bol:</span>
+                                          <input
+                                            type="number"
+                                            step="0.01"
+                                            value={s.paymentsBreakdown?.boleto || 0}
+                                            onChange={(e) => {
+                                              const val = parseFloat(e.target.value) || 0;
+                                              const updated = selectedMovement.productionControl!.mobileSales!.map(item => {
+                                                if (item.id === s.id) {
+                                                  const breakdown = { ...item.paymentsBreakdown, boleto: val };
+                                                  return { ...item, paymentsBreakdown: breakdown, paymentMethod: 'misto' };
+                                                }
+                                                return item;
+                                              });
+                                              handleSyncMobileData(updated, selectedMovement.productionControl!.mobileExpenses || []);
+                                            }}
+                                            className="w-14 bg-white border border-slate-200 rounded px-0.5 text-center font-mono text-[9px]"
+                                          />
+                                        </div>
+                                        <div className="flex items-center gap-0.5 justify-between">
+                                          <span>✍️ Chq:</span>
+                                          <input
+                                            type="number"
+                                            step="0.01"
+                                            value={s.paymentsBreakdown?.cheque || 0}
+                                            onChange={(e) => {
+                                              const val = parseFloat(e.target.value) || 0;
+                                              const updated = selectedMovement.productionControl!.mobileSales!.map(item => {
+                                                if (item.id === s.id) {
+                                                  const breakdown = { ...item.paymentsBreakdown, cheque: val };
+                                                  return { ...item, paymentsBreakdown: breakdown, paymentMethod: 'misto' };
+                                                }
+                                                return item;
+                                              });
+                                              handleSyncMobileData(updated, selectedMovement.productionControl!.mobileExpenses || []);
+                                            }}
+                                            className="w-14 bg-white border border-slate-200 rounded px-0.5 text-center font-mono text-[9px]"
+                                          />
+                                        </div>
+                                        <div className="flex items-center gap-0.5 justify-between col-span-2 bg-slate-100 p-0.5 rounded">
+                                          <span>⏳ A Prazo:</span>
+                                          <input
+                                            type="number"
+                                            step="0.01"
+                                            value={s.paymentsBreakdown?.outros || 0}
+                                            onChange={(e) => {
+                                              const val = parseFloat(e.target.value) || 0;
+                                              const updated = selectedMovement.productionControl!.mobileSales!.map(item => {
+                                                if (item.id === s.id) {
+                                                  const breakdown = { ...item.paymentsBreakdown, outros: val };
+                                                  return { ...item, paymentsBreakdown: breakdown, paymentMethod: 'misto' };
+                                                }
+                                                return item;
+                                              });
+                                              handleSyncMobileData(updated, selectedMovement.productionControl!.mobileExpenses || []);
+                                            }}
+                                            className="w-14 bg-white border border-slate-200 rounded px-0.5 text-center font-mono text-[9px]"
+                                          />
+                                        </div>
+                                      </div>
+                                      {(() => {
+                                        const expectedTotal = s.qty * s.value;
+                                        const bd = s.paymentsBreakdown || {};
+                                        const currentSum = (bd.dinheiro || 0) + (bd.pix || 0) + (bd.boleto || 0) + (bd.cheque || 0) + (bd.outros || 0);
+                                        const diff = expectedTotal - currentSum;
+                                        return (
+                                          <div className={`text-[8px] font-bold ${Math.abs(diff) < 0.01 ? 'text-emerald-600' : 'text-amber-600 animate-pulse'}`}>
+                                            {Math.abs(diff) < 0.01 
+                                              ? '✓ Total Ok' 
+                                              : `Restante: R$ ${diff.toFixed(2)}`}
+                                          </div>
+                                        );
+                                      })()}
+                                    </div>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="p-2 text-center">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const updated = selectedMovement.productionControl!.mobileSales!.filter(item => item.id !== s.id);
+                                    handleSyncMobileData(updated, selectedMovement.productionControl!.mobileExpenses || []);
+                                  }}
+                                  className="text-red-500 hover:text-red-750 hover:bg-red-50 p-1.5 rounded transition cursor-pointer"
+                                  title="Remover venda"
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center pb-2 border-b border-slate-100">
+                    <span className="text-[11px] font-bold text-slate-500 uppercase">Tabela de Despesas Registradas</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const currentExpenses = selectedMovement.productionControl?.mobileExpenses || [];
+                        const newExpense: SettlementExpense = {
+                          id: 'mobe-' + Math.random().toString(36).substring(2, 9),
+                          item: 'Nova Despesa',
+                          value: 10.00
+                        };
+                        handleSyncMobileData(selectedMovement.productionControl?.mobileSales || [], [...currentExpenses, newExpense]);
+                      }}
+                      className="bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[10px] px-2.5 py-1.5 rounded flex items-center gap-1 shadow-sm transition cursor-pointer"
+                    >
+                      <Plus size={12} />
+                      <span>Adicionar Despesa</span>
+                    </button>
+                  </div>
+
+                  {(!selectedMovement.productionControl?.mobileExpenses || selectedMovement.productionControl.mobileExpenses.length === 0) ? (
+                    <div className="text-center py-8 border-2 border-dashed border-slate-200 rounded-xl bg-slate-50/50">
+                      <p className="text-xs text-slate-500 italic">Nenhuma despesa registrada pelo motorista para esta viagem.</p>
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto border border-slate-150 rounded-xl shadow-3xs bg-white max-w-xl mx-auto">
+                      <table className="w-full text-left border-collapse text-[11px]">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-150 font-bold text-slate-600 uppercase tracking-wider text-[10px]">
+                            <th className="p-3">Descrição da Despesa</th>
+                            <th className="p-3 w-36 text-center">Valor (R$)</th>
+                            <th className="p-3 w-12 text-center"></th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 text-slate-700">
+                          {selectedMovement.productionControl.mobileExpenses.map((e) => (
+                            <tr key={e.id} className="hover:bg-slate-50/40">
+                              <td className="p-2">
+                                <input
+                                  type="text"
+                                  value={e.item}
+                                  onChange={(evt) => {
+                                    const updated = selectedMovement.productionControl!.mobileExpenses!.map(item =>
+                                      item.id === e.id ? { ...item, item: evt.target.value } : item
+                                    );
+                                    handleSyncMobileData(selectedMovement.productionControl!.mobileSales || [], updated);
+                                  }}
+                                  className="w-full bg-slate-50 hover:bg-slate-100 focus:bg-white border border-slate-200 hover:border-slate-300 focus:border-indigo-400 rounded px-2 py-1 outline-none font-medium text-xs transition"
+                                />
+                              </td>
+                              <td className="p-2 text-center">
+                                <input
+                                  type="text"
+                                  inputMode="numeric"
+                                  value={formatBRLWithoutSymbol(e.value)}
+                                  onChange={(evt) => {
+                                    const val = parseBRLCurrency(evt.target.value);
+                                    const updated = selectedMovement.productionControl!.mobileExpenses!.map(item =>
+                                      item.id === e.id ? { ...item, value: val } : item
+                                    );
+                                    handleSyncMobileData(selectedMovement.productionControl!.mobileSales || [], updated);
+                                  }}
+                                  className="w-32 bg-slate-50 hover:bg-slate-100 focus:bg-white border border-slate-200 hover:border-slate-300 focus:border-indigo-400 rounded px-1.5 py-1 text-right outline-none font-bold font-mono text-xs transition"
+                                />
+                              </td>
+                              <td className="p-2 text-center">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const updated = selectedMovement.productionControl!.mobileExpenses!.filter(item => item.id !== e.id);
+                                    handleSyncMobileData(selectedMovement.productionControl!.mobileSales || [], updated);
+                                  }}
+                                  className="text-red-500 hover:text-red-750 hover:bg-red-50 p-1.5 rounded transition cursor-pointer"
+                                  title="Remover despesa"
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="p-4 border-t border-slate-150 bg-slate-50 rounded-b-2xl flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setIsEditingMobileData(false)}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white font-extrabold text-xs px-5 py-2.5 rounded-lg shadow-sm hover:shadow transition uppercase tracking-wider flex items-center gap-1 cursor-pointer"
+              >
+                <Check size={14} />
+                <span>Salvar e Fechar</span>
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -4565,8 +5790,12 @@ export const PrestacaoContas: React.FC = () => {
                     <span>Suprimentos de Caixa:</span>
                     <span className="font-mono font-bold">+ R$ {cashierSummary.totalSuprimentos.toFixed(2)}</span>
                   </div>
-                  <div className="flex justify-between border-t border-dashed border-slate-200 pt-1.5 font-bold text-slate-900 bg-emerald-50/60 p-1.5 rounded-lg border border-emerald-200/40">
-                    <span className="text-emerald-800 font-black">SALDO LÍQUIDO (C/ COMIS., SUPR. E DESP.):</span>
+                  <div className="flex justify-between text-emerald-700 pb-1 border-b border-dashed border-slate-200/60">
+                    <span>Sobra de Caixa (Diferenças Positivas):</span>
+                    <span className="font-mono font-bold">+ R$ {cashierSummary.totalSobraCaixa.toFixed(2)}</span>
+                  </div>
+                  <div className="flex justify-between pt-1.5 font-bold text-slate-900 bg-emerald-50/60 p-1.5 rounded-lg border border-emerald-200/40">
+                    <span className="text-emerald-800 font-black">SALDO LÍQUIDO:</span>
                     <span className="font-mono font-black text-emerald-900 text-sm">R$ {cashierSummary.netDinheiro.toFixed(2)}</span>
                   </div>
                 </div>
@@ -4857,50 +6086,123 @@ export const PrestacaoContas: React.FC = () => {
       {activeSubTab === 'bank_reconciliation' && !selectedMovement && (
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           
-          {/* Statement Upload Box */}
-          <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm space-y-5 h-fit">
-            <div className="flex items-center space-x-2 border-b border-slate-100 pb-3">
-              <Landmark size={18} className="text-blue-600" />
-              <h2 className="text-sm font-bold text-slate-800 uppercase tracking-tight">Extrato do Banco (Importação)</h2>
-            </div>
-
-            <p className="text-xs text-slate-500 leading-relaxed font-medium">
-              Faça upload do arquivo de extrato do banco (formato CSV, OFX ou TXT) para importar os recebimentos PIX de entrada. O sistema processará o arquivo buscando PIX que possam ser vinculados à carga.
-            </p>
-
-            {/* Simulated file layout instruction */}
-            <div className="bg-slate-50 p-3 rounded text-[10px] text-slate-600 font-semibold space-y-1">
-              <p className="font-bold uppercase text-slate-800">Formato CSV esperado:</p>
-              <code className="block bg-white p-1.5 border border-slate-100 rounded text-slate-500 font-mono">
-                data;descricao;valor;referencia<br />
-                2026-06-24;PIX RECEBIDO CARLOS;1450.00;REF123
-              </code>
-            </div>
-
-            <div className="space-y-3">
-              <input
-                type="file"
-                ref={fileInputRef}
-                onChange={handleBankFileUpload}
-                accept=".csv,.ofx,.txt"
-                className="hidden"
-              />
-              
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                className="w-full bg-slate-900 hover:bg-slate-950 text-white font-bold text-xs uppercase p-3 rounded shadow transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
-              >
-                <Upload size={16} />
-                <span>Importar Arquivo Bancário</span>
-              </button>
-
-            </div>
-
-            {importSuccessMessage && (
-              <div className="p-3.5 bg-emerald-50 text-emerald-800 text-xs rounded border border-emerald-100 font-medium">
-                {importSuccessMessage}
+          {/* Left Column: Upload and Imported Files Manager */}
+          <div className="space-y-6">
+            {/* Statement Upload Box */}
+            <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm space-y-5 h-fit">
+              <div className="flex items-center space-x-2 border-b border-slate-100 pb-3">
+                <Landmark size={18} className="text-blue-600" />
+                <h2 className="text-sm font-bold text-slate-800 uppercase tracking-tight">Extrato do Banco (Importação)</h2>
               </div>
-            )}
+
+              <p className="text-xs text-slate-500 leading-relaxed font-medium">
+                Faça upload do arquivo de extrato do banco no formato <strong>OFX (.ofx)</strong> para importar os recebimentos PIX de entrada. O sistema processará o arquivo buscando PIX que possam ser vinculados à carga.
+              </p>
+
+              {/* Simulated file layout instruction */}
+              <div className="bg-slate-50 p-3 rounded text-[10px] text-slate-600 font-semibold space-y-1">
+                <p className="font-bold uppercase text-slate-800">Formato OFX esperado:</p>
+                <code className="block bg-white p-1.5 border border-slate-100 rounded text-slate-500 font-mono">
+                  &lt;OFX&gt;<br />
+                  &nbsp;&nbsp;&lt;BANKMSGSRSV1&gt;<br />
+                  &nbsp;&nbsp;&nbsp;&nbsp;&lt;STMTTRN&gt;...&lt;/STMTTRN&gt;
+                </code>
+              </div>
+
+              <div className="space-y-3">
+                <div className="space-y-2 border-t border-slate-100 pt-3">
+                  <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">
+                    Instituição Bancária
+                  </label>
+                  <select
+                    value={selectedImportInstitution}
+                    onChange={(e) => setSelectedImportInstitution(e.target.value)}
+                    className="w-full text-xs p-2.5 bg-white border border-slate-300 rounded focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-semibold text-slate-700 cursor-pointer"
+                  >
+                    <option value="auto">🔍 Detectar Automaticamente</option>
+                    <option value="Banco do Brasil">Banco do Brasil</option>
+                    <option value="Caixa Econômica">Caixa Econômica</option>
+                    <option value="Bradesco">Bradesco</option>
+                    <option value="outro">Outra Instituição...</option>
+                  </select>
+
+                  {selectedImportInstitution === 'outro' && (
+                    <div className="pt-1.5 animate-fadeIn">
+                      <input
+                        type="text"
+                        value={customImportInstitution}
+                        onChange={(e) => setCustomImportInstitution(e.target.value)}
+                        placeholder="Digite o nome do Banco..."
+                        className="w-full text-xs p-2.5 border border-slate-300 rounded focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-medium"
+                      />
+                    </div>
+                  )}
+                </div>
+
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  onChange={handleBankFileUpload}
+                  accept=".ofx"
+                  className="hidden"
+                />
+                
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="w-full bg-slate-900 hover:bg-slate-950 text-white font-bold text-xs uppercase p-3 rounded shadow transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Upload size={16} />
+                  <span>Importar Arquivo Bancário</span>
+                </button>
+
+              </div>
+
+              {importSuccessMessage && (
+                <div className="p-3.5 bg-emerald-50 text-emerald-800 text-xs rounded border border-emerald-100 font-medium">
+                  {importSuccessMessage}
+                </div>
+              )}
+
+              {importErrorMessage && (
+                <div className="p-3.5 bg-rose-50 text-rose-800 text-xs rounded border border-rose-100 font-medium">
+                  {importErrorMessage}
+                </div>
+              )}
+            </div>
+
+            {/* Imported Files Manager */}
+            <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm space-y-4">
+              <div className="flex items-center space-x-2 border-b border-slate-100 pb-3">
+                <FileSpreadsheet size={18} className="text-indigo-600" />
+                <h2 className="text-sm font-bold text-slate-800 uppercase tracking-tight">Arquivos Importados</h2>
+              </div>
+
+              {importedFiles.length === 0 ? (
+                <p className="text-xs text-slate-500 leading-relaxed italic">
+                  Nenhum arquivo importado registrado recentemente.
+                </p>
+              ) : (
+                <div className="space-y-3 max-h-[300px] overflow-y-auto pr-1">
+                  {importedFiles.map(file => (
+                    <div key={file.id} className="flex items-start justify-between p-3 rounded-lg bg-slate-50 border border-slate-100 group hover:border-slate-200 transition-all">
+                      <div className="space-y-1">
+                        <p className="text-xs font-bold text-slate-700 break-all">{file.name}</p>
+                        <p className="text-[10px] text-slate-500 font-semibold uppercase">
+                          {file.count} {file.count === 1 ? 'Transação' : 'Transações'} • {new Date(file.date).toLocaleDateString('pt-BR')}
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => setFileToDelete({ id: file.id, name: file.name })}
+                        className="p-1.5 text-rose-500 hover:bg-rose-50 hover:text-rose-700 rounded transition-all cursor-pointer"
+                        title="Excluir arquivo e suas transações"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Statement Transaction List */}
@@ -4908,15 +6210,32 @@ export const PrestacaoContas: React.FC = () => {
             
             {/* Filters */}
             <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-3">
-              <div className="relative flex-1 w-full">
-                <Search size={14} className="absolute left-2.5 top-2.5 text-slate-400" />
-                <input
-                  type="text"
-                  placeholder="Buscar por descrição, valor ou ref..."
-                  value={searchBankQuery}
-                  onChange={e => setSearchBankQuery(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded pl-8 pr-3 py-1.5 text-xs outline-none focus:bg-white focus:border-blue-400"
-                />
+              <div className="relative flex-1 w-full flex flex-col sm:flex-row items-center gap-2">
+                <div className="relative flex-1 w-full">
+                  <Search size={14} className="absolute left-2.5 top-2.5 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Buscar por banco (ex: BB, Bradesco), descrição, valor ou ref..."
+                    value={searchBankQuery}
+                    onChange={e => setSearchBankQuery(e.target.value)}
+                    className="w-full bg-slate-50 border border-slate-200 rounded pl-8 pr-3 py-1.5 text-xs outline-none focus:bg-white focus:border-blue-400"
+                  />
+                </div>
+                <select
+                  value={filterBankInstitution}
+                  onChange={(e) => setFilterBankInstitution(e.target.value)}
+                  className="w-full sm:w-44 bg-slate-50 border border-slate-200 rounded px-2.5 py-1.5 text-xs outline-none focus:bg-white font-semibold text-slate-700 cursor-pointer"
+                >
+                  <option value="all">🏦 Todas Inst.</option>
+                  <option value="Banco do Brasil">Banco do Brasil</option>
+                  <option value="Caixa Econômica">Caixa Econômica</option>
+                  <option value="Bradesco">Bradesco</option>
+                  {Array.from(new Set(bankTransactions.map(tx => tx.institution).filter(Boolean)))
+                    .filter(inst => inst !== 'Banco do Brasil' && inst !== 'Caixa Econômica' && inst !== 'Bradesco')
+                    .map(inst => (
+                      <option key={inst} value={inst!}>{inst}</option>
+                    ))}
+                </select>
               </div>
 
               <div className="flex bg-slate-100 p-1 rounded-lg">
@@ -4944,13 +6263,67 @@ export const PrestacaoContas: React.FC = () => {
                 >
                   Não Conciliados
                 </button>
+                <button
+                  onClick={() => setFilterBankReconciliation('refunds')}
+                  className={`px-3 py-1 text-[10px] font-bold uppercase transition ${
+                    filterBankReconciliation === 'refunds' ? 'bg-white text-slate-800 shadow-sm' : 'text-slate-500'
+                  }`}
+                >
+                  Devoluções
+                </button>
               </div>
             </div>
 
+            {/* Bulk Actions Panel */}
+            {selectedBankTxIds.length > 0 && (
+              <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-3 animate-fadeIn">
+                <div className="flex items-center space-x-2">
+                  <CheckCircle2 size={16} className="text-blue-600" />
+                  <div>
+                    <span className="text-xs font-bold text-blue-800 block sm:inline">
+                      {selectedBankTxIds.length} {selectedBankTxIds.length === 1 ? 'transação selecionada' : 'transações selecionadas'}
+                    </span>
+                    <span className="text-xs text-blue-600 sm:ml-2">
+                      (Total: <strong>R$ {bankTransactions.filter(tx => selectedBankTxIds.includes(tx.id)).reduce((sum, tx) => sum + tx.amount, 0).toFixed(2)}</strong>)
+                    </span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 w-full sm:w-auto">
+                  <button
+                    onClick={() => {
+                      setBulkManualReconcileReason('');
+                      setShowBulkReconcileModal(true);
+                    }}
+                    className="flex-1 sm:flex-initial bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[10px] uppercase px-3 py-1.5 rounded transition-all cursor-pointer"
+                  >
+                    Conciliar Lote
+                  </button>
+                  <button
+                    onClick={() => setShowBulkDeleteModal(true)}
+                    className="flex-1 sm:flex-initial bg-rose-600 hover:bg-rose-700 text-white font-bold text-[10px] uppercase px-3 py-1.5 rounded transition-all cursor-pointer flex items-center justify-center gap-1"
+                  >
+                    <Trash2 size={11} />
+                    <span>Excluir Lote</span>
+                  </button>
+                  <button
+                    onClick={() => setSelectedBankTxIds([])}
+                    className="bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold text-[10px] uppercase px-3 py-1.5 rounded transition-all cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* List Table */}
             <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-              <div className="p-4 border-b border-slate-100 bg-slate-50/50">
+              <div className="p-4 border-b border-slate-100 bg-slate-50/50 flex justify-between items-center">
                 <h3 className="text-xs font-bold text-slate-800 uppercase tracking-tight">Transações PIX do Extrato Importado</h3>
+                {selectedBankTxIds.length > 0 && (
+                  <span className="text-[10px] font-bold text-slate-500 uppercase">
+                    {selectedBankTxIds.length} selecionadas
+                  </span>
+                )}
               </div>
 
               {filteredBankTxs.length === 0 ? (
@@ -4960,9 +6333,28 @@ export const PrestacaoContas: React.FC = () => {
                   <table className="w-full text-left text-xs">
                     <thead>
                       <tr className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold text-[10px] uppercase">
+                        <th className="p-4 w-10 text-center">
+                          <input 
+                            type="checkbox"
+                            checked={filteredBankTxs.filter(tx => !tx.isReconciled).length > 0 && filteredBankTxs.filter(tx => !tx.isReconciled).every(tx => selectedBankTxIds.includes(tx.id))}
+                            onChange={(e) => {
+                              const selectable = filteredBankTxs.filter(tx => !tx.isReconciled);
+                              if (e.target.checked) {
+                                setSelectedBankTxIds(prev => {
+                                  const next = new Set([...prev, ...selectable.map(tx => tx.id)]);
+                                  return Array.from(next);
+                                });
+                              } else {
+                                const selectableIds = selectable.map(tx => tx.id);
+                                setSelectedBankTxIds(prev => prev.filter(id => !selectableIds.includes(id)));
+                              }
+                            }}
+                            className="rounded text-blue-600 focus:ring-blue-500 h-4 w-4 cursor-pointer"
+                          />
+                        </th>
                         <th className="p-4">Data Transação</th>
                         <th className="p-4">Descrição</th>
-                        <th className="p-4 text-right">Valor Recebido</th>
+                        <th className="p-4 text-right">Valor</th>
                         <th className="p-4">Cód. Documento</th>
                         <th className="p-4 text-center">Status</th>
                         <th className="p-4 text-right">Ações</th>
@@ -4970,14 +6362,89 @@ export const PrestacaoContas: React.FC = () => {
                     </thead>
                     <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
                       {filteredBankTxs.map(tx => (
-                        <tr key={tx.id} className="hover:bg-slate-50/60">
+                        <tr 
+                          key={tx.id} 
+                          className={`hover:bg-slate-50/60 transition-colors ${
+                            selectedBankTxIds.includes(tx.id) ? 'bg-blue-50/40 hover:bg-blue-50/60' : ''
+                          }`}
+                        >
+                          <td className="p-4 text-center">
+                            {!tx.isReconciled ? (
+                              <input 
+                                type="checkbox"
+                                checked={selectedBankTxIds.includes(tx.id)}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setSelectedBankTxIds(prev => [...prev, tx.id]);
+                                  } else {
+                                    setSelectedBankTxIds(prev => prev.filter(id => id !== tx.id));
+                                  }
+                                }}
+                                className="rounded text-blue-600 focus:ring-blue-500 h-4 w-4 cursor-pointer"
+                              />
+                            ) : (
+                              <div className="w-4 h-4 mx-auto flex items-center justify-center" title="Conciliado e travado">
+                                <Lock size={10} className="text-slate-400" />
+                              </div>
+                            )}
+                          </td>
                           <td className="p-4">{formatDateStringBR(tx.date)}</td>
-                          <td className="p-4 font-bold text-slate-900">{tx.description}</td>
-                          <td className="p-4 text-right font-black text-emerald-600">R$ {tx.amount.toFixed(2)}</td>
+                          <td className="p-4 font-bold text-slate-900">
+                            <div>
+                              <div className={`break-words whitespace-normal text-xs md:text-sm font-bold ${tx.isVoided ? 'line-through text-slate-400' : 'text-slate-900'}`}>{tx.description}</div>
+                              <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                                {tx.isVoided && (
+                                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider bg-rose-50 text-rose-600 border border-rose-100 animate-fadeIn" title="Esta transação foi inutilizada devido a uma devolução de PIX">
+                                    🚫 Inutilizada (Devolvido)
+                                  </span>
+                                )}
+                                {tx.isRefund && (
+                                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-wider bg-rose-50 text-rose-700 border border-rose-200 animate-fadeIn" title="Estorno ou Devolução de PIX">
+                                    ↩️ Devolução de PIX
+                                  </span>
+                                )}
+                                {(() => {
+                                  const matchingRefund = getMatchingRefund(tx);
+                                  if (matchingRefund) {
+                                    return (
+                                      <span 
+                                        className="inline-flex items-center px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider bg-amber-50 text-amber-700 border border-amber-200 animate-pulse cursor-pointer" 
+                                        title={`Identificada uma devolução pendente para este PIX no valor de R$ -${matchingRefund.amount.toFixed(2)}. Clique em 'Inutilizar Entrada' na devolução para vinculá-los.`}
+                                      >
+                                        ⚠️ Devolução Pendente (R$ -{matchingRefund.amount.toFixed(2)})
+                                      </span>
+                                    );
+                                  }
+                                  return null;
+                                })()}
+                                {tx.institution && (
+                                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-wider bg-indigo-50 text-indigo-700 border border-indigo-100 animate-fadeIn" title="Instituição Bancária">
+                                    🏦 {tx.institution}
+                                  </span>
+                                )}
+                                {tx.importFilename && (
+                                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider bg-slate-50 text-slate-400 border border-slate-200" title="Arquivo de origem">
+                                    📄 {tx.importFilename}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </td>
+                          <td className={`p-4 text-right font-black ${tx.isRefund || tx.amount < 0 ? 'text-rose-600' : tx.isVoided ? 'text-slate-400 line-through' : 'text-emerald-600'}`}>
+                            R$ {tx.amount.toFixed(2)}
+                          </td>
                           <td className="p-4 text-slate-500 font-mono">{tx.documentRef || '-'}</td>
                           <td className="p-4 text-center">
-                            {tx.isReconciled ? (
-                              tx.manualReconciliationReason ? (
+                            {tx.isVoided ? (
+                              <span className="px-2 py-0.5 bg-red-100 text-red-800 text-[9px] font-bold rounded-full" title="Transação de entrada inutilizada por devolução">
+                                INUTILIZADA
+                              </span>
+                            ) : tx.isReconciled ? (
+                              tx.isRefund ? (
+                                <span className="px-2 py-0.5 bg-purple-100 text-purple-800 text-[9px] font-bold rounded-full" title={`Devolução vinculada à entrada ID: ${tx.refundsTransactionId}`}>
+                                  DEV. CONCILIADA
+                                </span>
+                              ) : tx.manualReconciliationReason ? (
                                 <span className="px-2 py-0.5 bg-indigo-100 text-indigo-800 text-[9px] font-bold rounded-full" title={`Conciliado Manualmente: ${tx.manualReconciliationReason}`}>
                                   CONCILIADO MANUAL
                                 </span>
@@ -4987,43 +6454,93 @@ export const PrestacaoContas: React.FC = () => {
                                 </span>
                               )
                             ) : (
-                              <span className="px-2 py-0.5 bg-slate-100 text-slate-500 text-[9px] font-bold rounded-full">
-                                DISPONÍVEL
-                              </span>
+                              tx.isRefund ? (
+                                <span className="px-2 py-0.5 bg-amber-100 text-amber-800 text-[9px] font-bold rounded-full" title="Devolução disponível para vincular e inutilizar entrada">
+                                  DEV. DISPONÍVEL
+                                </span>
+                              ) : getMatchingRefund(tx) ? (
+                                <span className="px-2 py-0.5 bg-rose-100 text-rose-800 text-[9px] font-bold rounded-full animate-pulse" title="Esta transação de entrada possui uma devolução pendente no extrato bancário">
+                                  DEV. DETECTADA
+                                </span>
+                              ) : (
+                                <span className="px-2 py-0.5 bg-slate-100 text-slate-500 text-[9px] font-bold rounded-full">
+                                  DISPONÍVEL
+                                </span>
+                              )
                             )}
                           </td>
                           <td className="p-4 text-right">
                             <div className="flex justify-end gap-2">
-                              {tx.isReconciled && !tx.manualReconciliationReason && tx.reconciledWithSettlementId && (
+                              {tx.isVoided && (
+                                <span className="text-slate-400 text-[10px] font-bold flex items-center gap-1 select-none py-1 px-2 bg-slate-50 border border-slate-100 rounded">
+                                  🚫 Estornado
+                                </span>
+                              )}
+                              {tx.isRefund && tx.isReconciled && (
+                                <button 
+                                  onClick={() => undoVoidBankTransaction(tx.id)}
+                                  className="text-indigo-600 hover:bg-indigo-50 border border-indigo-200 px-2 py-1 rounded text-[10px] font-bold cursor-pointer"
+                                  title="Desfazer vinculação de estorno"
+                                >
+                                  Desfazer Estorno
+                                </button>
+                              )}
+                              {tx.isRefund && !tx.isReconciled && (
+                                <>
+                                  <button
+                                    onClick={() => {
+                                      setRefundTxToLink(tx);
+                                      setSelectedEntryTxId('');
+                                    }}
+                                    className="text-amber-700 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-2 py-1 rounded text-[10px] font-bold cursor-pointer"
+                                    title="Inutilizar transação de entrada correspondente"
+                                  >
+                                    Inutilizar Entrada
+                                  </button>
+                                  <button
+                                    onClick={() => setTxToDelete(tx)}
+                                    className="text-rose-600 hover:bg-rose-50 px-2 py-1 rounded text-[10px] font-bold cursor-pointer"
+                                    title="Excluir Transação"
+                                  >
+                                    Excluir
+                                  </button>
+                                </>
+                              )}
+                              {!tx.isRefund && !tx.isVoided && tx.isReconciled && !tx.manualReconciliationReason && tx.reconciledWithSettlementId && (
                                 <button 
                                   onClick={() => {
                                     const st = driverSettlements.find(d => d.id === tx.reconciledWithSettlementId);
                                     if (st) setViewingSettlement(st);
                                   }}
-                                  className="text-emerald-600 hover:bg-emerald-50 px-2 py-1 rounded text-[10px] font-bold"
+                                  className="text-emerald-600 hover:bg-emerald-50 px-2 py-1 rounded text-[10px] font-bold cursor-pointer"
                                   title="Visualizar Acerto"
                                 >
                                   Ver Acerto
                                 </button>
                               )}
-                              {tx.isReconciled && tx.manualReconciliationReason && (
+                              {!tx.isRefund && !tx.isVoided && tx.isReconciled && tx.manualReconciliationReason && !tx.voidedWithTransactionId && (
                                 <span className="text-slate-400 text-[10px] font-bold flex items-center gap-1 select-none py-1 px-2 bg-slate-50 border border-slate-100 rounded" title="Conciliação manual não pode ser desfeita">
                                   <Lock size={10} className="text-slate-400" />
                                   Conciliação Bloqueada
                                 </span>
                               )}
-                              {!tx.isReconciled && (
+                              {!tx.isRefund && !tx.isVoided && tx.isReconciled && tx.voidedWithTransactionId && (
+                                <span className="text-slate-400 text-[10px] font-bold flex items-center gap-1 select-none py-1 px-2 bg-slate-50 border border-slate-100 rounded" title="Inutilizada devido a uma devolução de PIX">
+                                  Inutilizada por Estorno
+                                </span>
+                              )}
+                              {!tx.isRefund && !tx.isVoided && !tx.isReconciled && (
                                 <>
                                   <button
                                     onClick={() => setTxToManualReconcile(tx)}
-                                    className="text-indigo-600 hover:bg-indigo-50 px-2 py-1 rounded text-[10px] font-bold"
+                                    className="text-indigo-600 hover:bg-indigo-50 px-2 py-1 rounded text-[10px] font-bold cursor-pointer"
                                     title="Conciliar sem acerto"
                                   >
                                     Conciliar Manual
                                   </button>
                                   <button
                                     onClick={() => setTxToDelete(tx)}
-                                    className="text-rose-600 hover:bg-rose-50 px-2 py-1 rounded text-[10px] font-bold"
+                                    className="text-rose-600 hover:bg-rose-50 px-2 py-1 rounded text-[10px] font-bold cursor-pointer"
                                     title="Excluir Transação"
                                   >
                                     Excluir
@@ -5063,10 +6580,14 @@ export const PrestacaoContas: React.FC = () => {
             </div>
 
             <div className="p-6 space-y-6 max-h-[80vh] overflow-y-auto">
-              <div className="grid grid-cols-2 gap-4 text-xs font-semibold">
+              <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-xs font-semibold">
                 <div>
                   <span className="text-[10px] text-slate-400 uppercase tracking-wider block">Veículo / Placa:</span>
                   <span className="text-slate-800 font-bold">{viewingSettlement.plate}</span>
+                </div>
+                <div>
+                  <span className="text-[10px] text-slate-400 uppercase tracking-wider block">Cidade da Viagem:</span>
+                  <span className="text-slate-800 font-bold text-indigo-700">{viewingSettlement.cidade || 'Não informada'}</span>
                 </div>
                 <div>
                   <span className="text-[10px] text-slate-400 uppercase tracking-wider block">Data do Fechamento:</span>
@@ -5393,7 +6914,7 @@ export const PrestacaoContas: React.FC = () => {
                 <div>
                   <span className="text-slate-400 font-bold block uppercase text-[9px]">Valor Esperado</span>
                   <span className="text-sm font-black text-slate-800 font-mono">
-                    R$ {reconcilingSettlement.payments.pix.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
+                    R$ {(reconcilingSettlement?.payments?.pix ?? 0).toLocaleString('pt-BR', { minimumFractionDigits: 2 })}
                   </span>
                 </div>
                 <div className="text-center">
@@ -5401,7 +6922,7 @@ export const PrestacaoContas: React.FC = () => {
                   <span className={`text-sm font-black font-mono ${
                     Math.abs(
                       bankTransactions.filter(tx => selectedTxIds.includes(tx.id)).reduce((sum, tx) => sum + tx.amount, 0) - 
-                      reconcilingSettlement.payments.pix
+                      (reconcilingSettlement?.payments?.pix ?? 0)
                     ) < 0.01 
                       ? 'text-emerald-600' 
                       : 'text-amber-600'
@@ -5414,7 +6935,7 @@ export const PrestacaoContas: React.FC = () => {
                 </div>
                 <div className="text-right">
                   {(() => {
-                    const expected = reconcilingSettlement.payments.pix;
+                    const expected = reconcilingSettlement?.payments?.pix ?? 0;
                     const selected = bankTransactions.filter(tx => selectedTxIds.includes(tx.id)).reduce((sum, tx) => sum + tx.amount, 0);
                     const diff = expected - selected;
                     return (
@@ -5461,17 +6982,17 @@ export const PrestacaoContas: React.FC = () => {
                 <Search size={14} className="absolute left-2.5 top-2.5 text-slate-400" />
                 <input
                   type="text"
-                  placeholder="Pesquisar por data (ex: 26/06), nome ou valor..."
+                  placeholder="Pesquisar por banco, data (ex: 26/06), nome ou valor..."
                   value={searchPixQuery}
                   onChange={e => setSearchPixQuery(e.target.value)}
                   className="w-full bg-slate-50 border border-slate-200 rounded pl-8 pr-3 py-1.5 text-xs outline-none focus:bg-white focus:border-blue-400 font-medium"
                 />
               </div>
 
-              {/* Statement List to choose from */}
+               {/* Statement List to choose from */}
               <div className="max-h-[250px] overflow-y-auto border border-slate-100 rounded-lg divide-y divide-slate-100">
-                {bankTransactions
-                  .filter(tx => !tx.isReconciled || tx.reconciledWithSettlementId === reconcilingSettlement.id)
+                {[...bankTransactions]
+                  .filter(tx => (!tx.isReconciled || tx.reconciledWithSettlementId === reconcilingSettlement.id) && !tx.isVoided && !tx.isRefund && tx.amount > 0)
                   .filter(tx => {
                     const query = searchPixQuery.toLowerCase().trim();
                     if (!query) return true;
@@ -5481,6 +7002,11 @@ export const PrestacaoContas: React.FC = () => {
                                           tx.amount.toFixed(2).includes(query) ||
                                           tx.amount.toFixed(2).replace('.', ',').includes(query);
                     const matchesRef = (tx.documentRef || '').toLowerCase().includes(query);
+                    const normalizedInst = (tx.institution || '').toLowerCase();
+                    const matchesInst = normalizedInst.includes(query) ||
+                                        (normalizedInst.includes('banco do brasil') && query === 'bb') ||
+                                        (normalizedInst.includes('caixa') && query === 'cef');
+                    const matchesFilename = (tx.importFilename || '').toLowerCase().includes(query);
                     const matchesDate = tx.date.includes(query) || (() => {
                       const [y, m, d] = tx.date.split('-');
                       if (y && m && d) {
@@ -5491,8 +7017,9 @@ export const PrestacaoContas: React.FC = () => {
                       return false;
                     })();
 
-                    return matchesDesc || matchesAmount || matchesRef || matchesDate;
+                    return matchesDesc || matchesAmount || matchesRef || matchesInst || matchesFilename || matchesDate;
                   })
+                  .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
                   .map(tx => {
                     const isChecked = selectedTxIds.includes(tx.id);
                     return (
@@ -5514,7 +7041,28 @@ export const PrestacaoContas: React.FC = () => {
                             className="h-4 w-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500 cursor-pointer"
                           />
                           <div>
-                            <p className="font-bold text-slate-900">{tx.description}</p>
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <p className="font-bold text-slate-900 break-words whitespace-normal text-xs md:text-sm">{tx.description}</p>
+                              {tx.institution && (
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-wider bg-indigo-50 text-indigo-700 border border-indigo-100">
+                                  🏦 {tx.institution}
+                                </span>
+                              )}
+                              {(() => {
+                                const matchingRefund = getMatchingRefund(tx);
+                                if (matchingRefund) {
+                                  return (
+                                    <span 
+                                      className="inline-flex items-center px-1.5 py-0.5 rounded text-[8px] font-bold uppercase bg-rose-50 text-rose-700 border border-rose-200 animate-pulse"
+                                      title={`Atenção: Este PIX possui uma devolução de R$ -${matchingRefund.amount.toFixed(2)} pendente no extrato.`}
+                                    >
+                                      ⚠️ DEVOLUÇÃO DETECTADA (R$ -{matchingRefund.amount.toFixed(2)})
+                                    </span>
+                                  );
+                                }
+                                return null;
+                              })()}
+                            </div>
                             <p className="text-[10px] text-slate-400 uppercase font-bold mt-0.5">
                               Ref: {tx.documentRef || '-'} | Data: {formatDateStringBR(tx.date)} {tx.reconciledWithSettlementId === reconcilingSettlement.id && (
                                 <span className="text-emerald-600 font-extrabold ml-1 uppercase text-[8px] tracking-wider">[Vinculado]</span>
@@ -5526,12 +7074,12 @@ export const PrestacaoContas: React.FC = () => {
                       </label>
                     );
                   })}
-                {bankTransactions.filter(tx => !tx.isReconciled || tx.reconciledWithSettlementId === reconcilingSettlement.id).length === 0 && (
+                {bankTransactions.filter(tx => (!tx.isReconciled || tx.reconciledWithSettlementId === reconcilingSettlement.id) && !tx.isVoided && !tx.isRefund && tx.amount > 0).length === 0 && (
                   <div className="p-8 text-center text-slate-400 uppercase tracking-wider text-[10px] font-bold">Nenhuma transação bancária PIX disponível. Importe ou simule um arquivo bancário primeiro.</div>
                 )}
-                {bankTransactions.filter(tx => !tx.isReconciled || tx.reconciledWithSettlementId === reconcilingSettlement.id).length > 0 &&
+                {bankTransactions.filter(tx => (!tx.isReconciled || tx.reconciledWithSettlementId === reconcilingSettlement.id) && !tx.isVoided && !tx.isRefund && tx.amount > 0).length > 0 &&
                  bankTransactions
-                  .filter(tx => !tx.isReconciled || tx.reconciledWithSettlementId === reconcilingSettlement.id)
+                  .filter(tx => (!tx.isReconciled || tx.reconciledWithSettlementId === reconcilingSettlement.id) && !tx.isVoided && !tx.isRefund && tx.amount > 0)
                   .filter(tx => {
                     const query = searchPixQuery.toLowerCase().trim();
                     if (!query) return true;
@@ -5541,6 +7089,11 @@ export const PrestacaoContas: React.FC = () => {
                                           tx.amount.toFixed(2).includes(query) ||
                                           tx.amount.toFixed(2).replace('.', ',').includes(query);
                     const matchesRef = (tx.documentRef || '').toLowerCase().includes(query);
+                    const normalizedInst = (tx.institution || '').toLowerCase();
+                    const matchesInst = normalizedInst.includes(query) ||
+                                        (normalizedInst.includes('banco do brasil') && query === 'bb') ||
+                                        (normalizedInst.includes('caixa') && query === 'cef');
+                    const matchesFilename = (tx.importFilename || '').toLowerCase().includes(query);
                     const matchesDate = tx.date.includes(query) || (() => {
                       const [y, m, d] = tx.date.split('-');
                       if (y && m && d) {
@@ -5551,7 +7104,7 @@ export const PrestacaoContas: React.FC = () => {
                       return false;
                     })();
 
-                    return matchesDesc || matchesAmount || matchesRef || matchesDate;
+                    return matchesDesc || matchesAmount || matchesRef || matchesInst || matchesFilename || matchesDate;
                   }).length === 0 && (
                     <div className="p-8 text-center text-slate-400 uppercase tracking-wider text-[10px] font-bold">Nenhuma transação corresponde à busca.</div>
                   )}
@@ -5665,11 +7218,372 @@ export const PrestacaoContas: React.FC = () => {
               <button
                 onClick={() => {
                   removeBankTransaction(txToDelete.id);
+                  setSelectedBankTxIds(prev => prev.filter(id => id !== txToDelete.id));
                   setTxToDelete(null);
                 }}
                 className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white text-[10px] font-bold uppercase rounded shadow cursor-pointer"
               >
                 Excluir
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* INUTILIZAR ENTRADA MODAL */}
+      {refundTxToLink && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-xl max-w-lg w-full border border-slate-200 overflow-hidden my-8 animate-fadeIn">
+            <div className="p-4 bg-amber-600 text-white flex justify-between items-center">
+              <div>
+                <h3 className="text-sm font-bold uppercase tracking-tight flex items-center gap-1.5">
+                  <AlertTriangle size={18} />
+                  Inutilizar Transação por Devolução
+                </h3>
+              </div>
+              <button 
+                onClick={() => {
+                  setRefundTxToLink(null);
+                  setSelectedEntryTxId('');
+                  setSearchInutilizarQuery('');
+                }} 
+                className="text-amber-100 hover:text-white cursor-pointer"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            
+            <div className="p-6 space-y-4">
+              {/* Devolução Info */}
+              <div className="bg-rose-50 border border-rose-100 rounded-lg p-3 text-xs space-y-1">
+                <div className="font-bold text-rose-800 uppercase tracking-wider text-[9px]">Transação de Devolução (Estorno)</div>
+                <div className="flex justify-between items-start gap-3">
+                  <div className="font-bold text-slate-800 text-xs md:text-sm flex-1 min-w-0 break-all whitespace-normal pr-2 leading-relaxed">{refundTxToLink.description}</div>
+                  <span className="font-black text-rose-600 text-xs md:text-sm shrink-0">R$ {refundTxToLink.amount.toFixed(2)}</span>
+                </div>
+                <div className="text-slate-500 font-semibold uppercase text-[9px] flex gap-2">
+                  <span>Data: {formatDateStringBR(refundTxToLink.date)}</span>
+                  <span>|</span>
+                  <span>Ref: {refundTxToLink.documentRef || 'N/A'}</span>
+                </div>
+              </div>
+
+              {/* Instructions */}
+              <div>
+                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
+                  Selecione a Transação de Entrada correspondente para inutilizar:
+                </label>
+
+                {/* Search input for selection area */}
+                <div className="relative mb-3">
+                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                    <Search size={14} className="text-slate-400" />
+                  </div>
+                  <input
+                    type="text"
+                    value={searchInutilizarQuery}
+                    onChange={(e) => setSearchInutilizarQuery(e.target.value)}
+                    placeholder="Pesquisar por descrição, valor ou data..."
+                    className="block w-full pl-9 pr-8 py-1.5 text-xs border border-slate-200 rounded-lg bg-slate-50 focus:bg-white focus:ring-1 focus:ring-amber-500 focus:border-amber-500 focus:outline-hidden transition"
+                  />
+                  {searchInutilizarQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setSearchInutilizarQuery('')}
+                      className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 cursor-pointer"
+                    >
+                      <X size={14} />
+                    </button>
+                  )}
+                </div>
+
+                {/* Entry selection scrollable area */}
+                <div className="max-h-56 overflow-y-auto border border-slate-200 rounded-lg divide-y divide-slate-100 bg-white">
+                  {(() => {
+                    const candidates = bankTransactions.filter(tx => !tx.isVoided && !tx.isRefund && tx.amount > 0);
+                    
+                    const filteredCandidates = candidates.filter(tx => {
+                      if (!searchInutilizarQuery.trim()) return true;
+                      const query = searchInutilizarQuery.toLowerCase();
+                      
+                      const matchesDesc = tx.description.toLowerCase().includes(query);
+                      const matchesAmount = tx.amount.toFixed(2).includes(query) || tx.amount.toString().includes(query);
+                      const matchesDate = formatDateStringBR(tx.date).includes(query) || tx.date.includes(query);
+                      
+                      return matchesDesc || matchesAmount || matchesDate;
+                    });
+                    
+                    const sortedCandidates = [...filteredCandidates].sort((a, b) => {
+                      const diffA = Math.abs(a.amount - Math.abs(refundTxToLink.amount));
+                      const diffB = Math.abs(b.amount - Math.abs(refundTxToLink.amount));
+                      const isExactA = diffA < 0.01;
+                      const isExactB = diffB < 0.01;
+                      if (isExactA && !isExactB) return -1;
+                      if (!isExactA && isExactB) return 1;
+                      return b.date.localeCompare(a.date);
+                    });
+
+                    if (sortedCandidates.length === 0) {
+                      return (
+                        <div className="p-6 text-center text-slate-400 text-xs font-semibold uppercase tracking-wider">
+                          {searchInutilizarQuery ? 'Nenhuma transação correspondente aos filtros' : 'Nenhuma transação de entrada disponível para inutilização.'}
+                        </div>
+                      );
+                    }
+
+                    return sortedCandidates.map(tx => {
+                      const isExactValue = Math.abs(tx.amount - Math.abs(refundTxToLink.amount)) < 0.01;
+                      const isSelected = selectedEntryTxId === tx.id;
+                      
+                      const linkedSettlement = tx.isReconciled ? driverSettlements.find(s => s.id === tx.reconciledWithSettlementId) : null;
+                      const linkedDriver = linkedSettlement ? registeredDrivers.find(d => d.id === linkedSettlement.driverId) : null;
+
+                      return (
+                        <label 
+                          key={tx.id} 
+                          className={`flex items-start p-3 gap-3 cursor-pointer hover:bg-slate-50/60 transition-colors ${
+                            isSelected ? 'bg-blue-50 hover:bg-blue-50' : isExactValue ? 'bg-emerald-50/20' : ''
+                          }`}
+                        >
+                          <input 
+                            type="radio" 
+                            name="selectedEntryTxId" 
+                            checked={isSelected}
+                            onChange={() => setSelectedEntryTxId(tx.id)}
+                            className="mt-0.5 rounded-full text-blue-600 focus:ring-blue-500 cursor-pointer h-4 w-4"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <div className="flex justify-between items-start gap-3">
+                              <div className="font-bold text-xs text-slate-900 flex-1 break-all whitespace-normal pr-1 leading-relaxed">{tx.description}</div>
+                              <span className="font-black text-xs text-emerald-600 shrink-0">R$ {tx.amount.toFixed(2)}</span>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                              <span className="text-[9px] font-bold text-slate-400 uppercase">
+                                {formatDateStringBR(tx.date)}
+                              </span>
+                              {isExactValue && (
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[8px] font-black uppercase tracking-wider bg-emerald-100 text-emerald-800 border border-emerald-200">
+                                  ⭐ Valor Idêntico
+                                </span>
+                              )}
+                              {tx.isReconciled && (
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider bg-amber-100 text-amber-800 border border-amber-200">
+                                  ⚠️ Conciliado ({linkedDriver?.name || 'Motorista'})
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </label>
+                      );
+                    });
+                  })()}
+                </div>
+              </div>
+
+              {/* Warnings and alerts */}
+              {(() => {
+                if (!selectedEntryTxId) return null;
+                const selectedTx = bankTransactions.find(t => t.id === selectedEntryTxId);
+                if (!selectedTx?.isReconciled) return null;
+                
+                const linkedSettlement = driverSettlements.find(s => s.id === selectedTx.reconciledWithSettlementId);
+                const linkedDriver = linkedSettlement ? registeredDrivers.find(d => d.id === linkedSettlement.driverId) : null;
+
+                return (
+                  <div className="bg-amber-50 border border-amber-200 text-amber-900 rounded-lg p-3 text-xs font-semibold space-y-1.5 animate-fadeIn">
+                    <div className="flex items-center gap-1.5 text-amber-700 font-bold">
+                      <AlertTriangle size={15} />
+                      <span>ATENÇÃO: TRANSAÇÃO CONCILIADA!</span>
+                    </div>
+                    <p className="normal-case leading-relaxed text-[11px]">
+                      A entrada selecionada já está conciliada com o acerto do motorista <strong>{linkedDriver?.name || 'Não identificado'}</strong> (Placa: {linkedSettlement?.plate || 'N/A'}, Data: {linkedSettlement ? formatDateStringBR(linkedSettlement.dateSettlement) : 'N/A'}).
+                    </p>
+                    <p className="normal-case text-amber-800 leading-relaxed text-[10px]">
+                      Ao confirmar, esta transação de entrada será desmarcada do acerto e marcada como <strong>inutilizada</strong>.
+                    </p>
+                  </div>
+                );
+              })()}
+            </div>
+
+            <div className="p-4 bg-slate-50 border-t flex justify-end space-x-2">
+              <button
+                onClick={() => {
+                  setRefundTxToLink(null);
+                  setSelectedEntryTxId('');
+                  setSearchInutilizarQuery('');
+                }}
+                className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold uppercase rounded cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                disabled={!selectedEntryTxId}
+                onClick={() => {
+                  voidBankTransaction(selectedEntryTxId, refundTxToLink.id);
+                  setRefundTxToLink(null);
+                  setSelectedEntryTxId('');
+                  setSearchInutilizarQuery('');
+                }}
+                className={`px-4 py-2 text-white text-[10px] font-bold uppercase rounded shadow cursor-pointer ${
+                  selectedEntryTxId ? 'bg-amber-600 hover:bg-amber-700' : 'bg-slate-300 cursor-not-allowed'
+                }`}
+              >
+                Inutilizar Entrada
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* DELETE IMPORTED FILE MODAL */}
+      {fileToDelete && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full border border-slate-200 overflow-hidden my-8">
+            <div className="p-4 bg-rose-950 text-white flex justify-between items-center">
+              <div>
+                <h3 className="text-sm font-bold uppercase tracking-tight">Excluir Arquivo do Extrato</h3>
+              </div>
+              <button onClick={() => setFileToDelete(null)} className="text-rose-200 hover:text-white cursor-pointer">
+                <X size={20} />
+              </button>
+            </div>
+            
+            <div className="p-6 space-y-4">
+              <p className="text-sm text-slate-600">
+                Deseja realmente excluir o arquivo de extrato <strong>{fileToDelete.name}</strong> e todas as suas transações correspondentes?
+              </p>
+              <div className="text-xs text-rose-600 font-semibold bg-rose-50 p-3 rounded border border-rose-200 space-y-1.5">
+                <p className="font-bold">⚠️ ATENÇÃO:</p>
+                <p>• Esta ação removerá todas as transações importadas a partir deste arquivo.</p>
+                <p>• Quaisquer transações que já tenham sido vinculadas ou conciliadas a acertos de motoristas serão desvinculadas automaticamente!</p>
+              </div>
+            </div>
+
+            <div className="p-4 bg-slate-50 border-t flex justify-end space-x-2">
+              <button
+                onClick={() => setFileToDelete(null)}
+                className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold uppercase rounded cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => {
+                  deleteImportedFile(fileToDelete.id);
+                  // Clear selection if some deleted transactions were selected
+                  const remainingIds = bankTransactions
+                    .filter(tx => tx.importedFileId !== fileToDelete.id)
+                    .map(tx => tx.id);
+                  setSelectedBankTxIds(prev => prev.filter(id => remainingIds.includes(id)));
+                  setFileToDelete(null);
+                }}
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white text-[10px] font-bold uppercase rounded shadow cursor-pointer"
+              >
+                Confirmar Exclusão
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* BULK MANUAL RECONCILIATION MODAL */}
+      {showBulkReconcileModal && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full border border-slate-200 overflow-hidden my-8">
+            <div className="p-4 bg-indigo-900 text-white flex justify-between items-center">
+              <div>
+                <h3 className="text-sm font-bold uppercase tracking-tight">Conciliar {selectedBankTxIds.length} Transações</h3>
+              </div>
+              <button onClick={() => setShowBulkReconcileModal(false)} className="text-indigo-200 hover:text-white cursor-pointer">
+                <X size={20} />
+              </button>
+            </div>
+            
+            <div className="p-6">
+              <p className="text-sm text-slate-600 mb-4">
+                Informe o motivo da conciliação avulsa em lote para as <strong>{selectedBankTxIds.length} transações selecionadas</strong> que somam <strong>R$ {bankTransactions.filter(tx => selectedBankTxIds.includes(tx.id)).reduce((sum, tx) => sum + tx.amount, 0).toFixed(2)}</strong>. Elas não serão vinculadas a nenhum acerto.
+              </p>
+              
+              <div className="mb-4">
+                <label className="block text-[10px] uppercase font-bold text-slate-500 mb-1">Motivo / Observação</label>
+                <textarea
+                  value={bulkManualReconcileReason}
+                  onChange={(e) => setBulkManualReconcileReason(e.target.value)}
+                  placeholder="Ex: Conciliado via conferência manual de lançamentos, ajuste de saldo..."
+                  className="w-full border border-slate-300 p-2 rounded text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 h-24 resize-none"
+                />
+              </div>
+            </div>
+
+            <div className="p-4 bg-slate-50 border-t flex justify-end space-x-2">
+              <button
+                onClick={() => setShowBulkReconcileModal(false)}
+                className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold uppercase rounded cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => {
+                  if (bulkManualReconcileReason.trim() === '') {
+                    alert('Informe um motivo para a conciliação manual.');
+                    return;
+                  }
+                  selectedBankTxIds.forEach(id => {
+                    manuallyReconcileBankTransaction(id, bulkManualReconcileReason.trim());
+                  });
+                  setSelectedBankTxIds([]);
+                  setShowBulkReconcileModal(false);
+                  setBulkManualReconcileReason('');
+                }}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-[10px] font-bold uppercase rounded shadow cursor-pointer"
+              >
+                Confirmar Conciliação
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* BULK DELETE BANK TRANSACTIONS MODAL */}
+      {showBulkDeleteModal && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full border border-slate-200 overflow-hidden my-8">
+            <div className="p-4 bg-rose-900 text-white flex justify-between items-center">
+              <div>
+                <h3 className="text-sm font-bold uppercase tracking-tight">Excluir {selectedBankTxIds.length} Transações</h3>
+              </div>
+              <button onClick={() => setShowBulkDeleteModal(false)} className="text-rose-200 hover:text-white cursor-pointer">
+                <X size={20} />
+              </button>
+            </div>
+            
+            <div className="p-6">
+              <p className="text-sm text-slate-600 mb-4">
+                Deseja realmente excluir as <strong>{selectedBankTxIds.length} transações selecionadas</strong> no valor total de <strong>R$ {bankTransactions.filter(tx => selectedBankTxIds.includes(tx.id)).reduce((sum, tx) => sum + tx.amount, 0).toFixed(2)}</strong>?
+              </p>
+              <p className="text-xs text-rose-600 font-semibold bg-rose-50 p-2.5 rounded border border-rose-200">
+                Esta ação é irreversível e estas transações não estarão mais disponíveis para conciliação.
+              </p>
+            </div>
+
+            <div className="p-4 bg-slate-50 border-t flex justify-end space-x-2">
+              <button
+                onClick={() => setShowBulkDeleteModal(false)}
+                className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 text-[10px] font-bold uppercase rounded cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => {
+                  selectedBankTxIds.forEach(id => {
+                    removeBankTransaction(id);
+                  });
+                  setSelectedBankTxIds([]);
+                  setShowBulkDeleteModal(false);
+                }}
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white text-[10px] font-bold uppercase rounded shadow cursor-pointer"
+              >
+                Excluir Todas
               </button>
             </div>
           </div>
@@ -5697,7 +7611,7 @@ export const PrestacaoContas: React.FC = () => {
 
               {(() => {
                 const enteredWaterQty = sales
-                  .filter(s => s.item.toLowerCase().includes('água') || s.item.toLowerCase().includes('agua') || s.item.toLowerCase().includes('bonifica'))
+                  .filter(s => (s.item.toLowerCase().includes('água') || s.item.toLowerCase().includes('agua') || s.item.toLowerCase().includes('bonifica')) && !isDisposableProduct(s.item))
                   .reduce((sum, s) => sum + s.qty, 0);
                 const enteredVasilhameQty = sales
                   .filter(s => s.item.toLowerCase().includes('vasilhame') && !s.item.toLowerCase().includes('retorno'))

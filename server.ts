@@ -3,7 +3,13 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import fs from "fs/promises";
-import { Firestore } from "@google-cloud/firestore";
+import { initializeApp, setLogLevel as setAppLogLevel } from "firebase/app";
+import { initializeFirestore, doc, getDoc, setDoc, onSnapshot, setLogLevel as setFirestoreLogLevel } from "firebase/firestore";
+
+try {
+  setAppLogLevel('silent');
+  setFirestoreLogLevel('silent');
+} catch (e) {}
 
 const cleanState = {
   movements: [],
@@ -73,7 +79,28 @@ const cleanState = {
     { id: 'moto', name: 'Moto', bypassProductionDefault: true },
     { id: 'utilitario', name: 'Utilitário / Van', bypassProductionDefault: true }
   ],
-  customEntryPurposes: []
+  customEntryPurposes: [
+    { id: 'producao', name: 'Fluxo Normal de Produção (Fila)', bypassProductionDefault: false },
+    { id: 'carga_descarga', name: 'Carga / Descarga de Mercadorias', bypassProductionDefault: true },
+    { id: 'entrega_mercadoria', name: 'Entregas de Insumos / Encomendas', bypassProductionDefault: true },
+    { id: 'visita_servico', name: 'Visita ou Prestação de Serviços', bypassProductionDefault: true }
+  ],
+  customStockProducts: [],
+  initialStockLevels: {},
+  initialDieselStocks: {},
+  dieselTankCapacities: {},
+  initialArlaStocks: {},
+  arlaTankCapacities: {},
+  deletedMovementsLogs: [],
+  productionOpen: {},
+  manualStockAdjustments: [],
+  resolvedStockAlerts: [],
+  verifiedScrapAlerts: [],
+  scrapConferences: [],
+  driverSettlements: [],
+  bankTransactions: [],
+  clearedAt: 0,
+  deletedIds: []
 };
 
 async function startServer() {
@@ -84,6 +111,7 @@ async function startServer() {
 
   // Shared state cloud database on server-side using local database file as fallback/baseline
   let sharedState: any = null;
+  let activeDb: any = null;
   const dbPath = path.join(process.cwd(), "database.json");
 
   // Shared photos database file for backup of large split photos
@@ -120,43 +148,71 @@ async function startServer() {
   }
 
   let docRef: any = null;
+  let isFirestoreLoaded = false;
+  let isFirestoreQuotaExhausted = false;
 
   // Load initial state from Firestore if exists, or seed with default state
   try {
     const configPath = path.join(process.cwd(), "firebase-applet-config.json");
-    const configContent = await fs.readFile(configPath, "utf-8");
-    const config = JSON.parse(configContent);
-    const firestore = new Firestore({
-      projectId: config.projectId,
-      databaseId: config.firestoreDatabaseId || "(default)"
-    });
-    docRef = firestore.collection("appState").doc("current");
-    const docSnap = await docRef.get();
-    
-    if (docSnap.exists) {
-      // Restore existing Firestore state into server's sharedState memory on boot
-      sharedState = docSnap.data();
-      await fs.writeFile(dbPath, JSON.stringify(sharedState, null, 2), "utf-8");
-      console.log("Existing Firestore database state loaded on startup successfully.");
+    const configExists = await fs.access(configPath).then(() => true).catch(() => false);
+    if (!configExists) {
+      console.log("No firebase-applet-config.json found. Operating in local fallback mode.");
+      isFirestoreLoaded = true;
     } else {
-      // First-time load: seed Firestore with the default state
-      await docRef.set(sharedState || cleanState);
-      console.log("Firestore collection seeded with initial state successfully.");
-    }
-
-    // Set up a server-side real-time listener to keep the in-memory cache 100% synchronized with any cloud-side writes (e.g. from direct client-side Firestore writes)
-    docRef.onSnapshot((snapshot: any) => {
-      if (snapshot && snapshot.exists) {
-        sharedState = snapshot.data();
-        fs.writeFile(dbPath, JSON.stringify(sharedState, null, 2), "utf-8").catch(() => {});
-        console.log("Server sharedState updated dynamically in real-time from Firestore Doc.");
+      const configContent = await fs.readFile(configPath, "utf-8");
+      const config = JSON.parse(configContent);
+      
+      const fbApp = initializeApp(config);
+      const db = initializeFirestore(fbApp, {}, config.firestoreDatabaseId);
+      activeDb = db;
+      
+      const firestoreState = await loadFullStateFromFirestore(db);
+      
+      if (firestoreState) {
+        // Restore existing Firestore state into server's sharedState memory on boot
+        sharedState = firestoreState;
+        await fs.writeFile(dbPath, JSON.stringify(sharedState, null, 2), "utf-8");
+        console.log("Existing Firestore database state loaded on startup successfully.");
+      } else {
+        // First-time load: seed Firestore with the default state
+        await saveFullStateToFirestore(db, sharedState || cleanState);
+        console.log("Firestore collection seeded with initial state or running on local fallback.");
       }
-    }, (err: any) => {
-      console.error("Firestore onSnapshot subscription failed on server:", err);
-    });
+      isFirestoreLoaded = true;
 
-  } catch (err) {
-    console.error("Error connecting or seeding state in Firestore on start:", err);
+      // Set up a server-side real-time listener on appState/main
+      if (!isFirestoreQuotaExhausted) {
+        const mainDocRef = doc(db, "appState", "main");
+        onSnapshot(mainDocRef, async (snapshot: any) => {
+          if (snapshot && snapshot.exists() && !isFirestoreQuotaExhausted) {
+            const freshCloudState = await loadFullStateFromFirestore(db);
+            if (freshCloudState) {
+              sharedState = freshCloudState;
+              fs.writeFile(dbPath, JSON.stringify(sharedState, null, 2), "utf-8").catch(() => {});
+              console.log("Server sharedState updated dynamically in real-time from Firestore.");
+            }
+          }
+        }, (err: any) => {
+          if (err?.code === 'cancelled' || err?.message?.includes('CANCELLED') || err?.code === 1) {
+            return;
+          }
+          if (err?.message?.includes('Quota exceeded') || err?.code === 'resource-exhausted' || err?.code === 8) {
+            console.warn("Firestore listener quota exceeded on server. Falling back to local database.json storage.");
+            isFirestoreQuotaExhausted = true;
+          } else {
+            console.error("Firestore onSnapshot subscription failed on server:", err);
+          }
+        });
+      }
+    }
+  } catch (err: any) {
+    if (err?.message?.includes('Quota exceeded') || err?.code === 'resource-exhausted' || err?.code === 8) {
+      console.warn("Firestore quota exceeded on startup. Falling back to local database.json storage.");
+      isFirestoreQuotaExhausted = true;
+    } else {
+      console.error("Error connecting or seeding state in Firestore on start:", err);
+    }
+    isFirestoreLoaded = true;
   }
 
   app.get("/api/state", async (req, res) => {
@@ -185,15 +241,266 @@ async function startServer() {
     }
   });
 
+function stripHeavyDataForServer(state: any): any {
+  if (!state || typeof state !== "object") return state;
+
+  const strippedMovements = (state.movements || []).map((m: any) => {
+    if (!m) return m;
+    let newM = m;
+    let changed = false;
+
+    if (m.orderPhoto && (m.orderPhoto.startsWith('data:') || m.orderPhoto.length > 200)) {
+      if (!changed) { newM = { ...m }; changed = true; }
+      newM.hasOrderPhoto = true;
+      newM.orderPhoto = '';
+    }
+
+    if (m.productionControl) {
+      let pcChanged = false;
+      let newPC = m.productionControl;
+
+      if (m.productionControl.avariasDescarregamentoPhoto && (m.productionControl.avariasDescarregamentoPhoto.startsWith('data:') || m.productionControl.avariasDescarregamentoPhoto.length > 200)) {
+        if (!pcChanged) { newPC = { ...m.productionControl }; pcChanged = true; }
+        newPC.hasAvariasDescarregamentoPhoto = true;
+        newPC.avariasDescarregamentoPhoto = '';
+      }
+
+      if (m.productionControl.avariasCarregamentoPhoto && (m.productionControl.avariasCarregamentoPhoto.startsWith('data:') || m.productionControl.avariasCarregamentoPhoto.length > 200)) {
+        if (!pcChanged) { newPC = { ...m.productionControl }; pcChanged = true; }
+        newPC.hasAvariasCarregamentoPhoto = true;
+        newPC.avariasCarregamentoPhoto = '';
+      }
+
+      if (pcChanged) {
+        if (!changed) { newM = { ...m }; changed = true; }
+        newM.productionControl = newPC;
+      }
+    }
+
+    return newM;
+  });
+
+  const strippedExpeditions = (state.disposableExpeditions || []).map((exp: any) => {
+    if (!exp) return exp;
+    if (exp.attachmentUrl && (exp.attachmentUrl.startsWith('data:') || exp.attachmentUrl.length > 200)) {
+      return { ...exp, hasAttachment: true, attachmentUrl: '' };
+    }
+    return exp;
+  });
+
+  const strippedInsumos = (state.disposableInsumoEntries || []).map((ins: any) => {
+    if (!ins) return ins;
+    if (ins.attachmentUrl && (ins.attachmentUrl.startsWith('data:') || ins.attachmentUrl.length > 200)) {
+      return { ...ins, hasAttachment: true, attachmentUrl: '' };
+    }
+    return ins;
+  });
+
+  const strippedTripLoads = (state.driverTripLoads || []).map((load: any) => {
+    if (!load) return load;
+    if (load.attachmentUrl && (load.attachmentUrl.startsWith('data:') || load.attachmentUrl.length > 200)) {
+      return { ...load, hasAttachment: true, attachmentUrl: '' };
+    }
+    return load;
+  });
+
+  const strippedTripDeliveries = (state.driverTripDeliveries || []).map((del: any) => {
+    if (!del) return del;
+    if (del.attachmentUrl && (del.attachmentUrl.startsWith('data:') || del.attachmentUrl.length > 200)) {
+      return { ...del, hasAttachment: true, attachmentUrl: '' };
+    }
+    return del;
+  });
+
+  const strippedSettlements = (state.driverSettlements || []).map((ds: any) => {
+    if (!ds) return ds;
+    let changed = false;
+    let newDs = ds;
+    if (ds.attachmentUrl && (ds.attachmentUrl.startsWith('data:') || ds.attachmentUrl.length > 200)) {
+      newDs = { ...newDs, hasAttachment: true, attachmentUrl: '' };
+      changed = true;
+    }
+    return newDs;
+  });
+
+  const strippedPreSales = (state.preSales || []).map((ps: any) => {
+    if (!ps) return ps;
+    const att = ps.attachmentUrl || ps.photoUrl || ps.expeditionPhoto;
+    if (att && (att.startsWith('data:') || att.length > 200)) {
+      return { ...ps, hasAttachment: true, attachmentUrl: '', photoUrl: '', expeditionPhoto: '' };
+    }
+    return ps;
+  });
+
+  const sanitizeDeep = (obj: any): any => {
+    if (!obj || typeof obj !== 'object') return obj;
+    if (Array.isArray(obj)) return obj.map(sanitizeDeep).filter(item => item !== undefined);
+    const result: any = {};
+    for (const key of Object.keys(obj)) {
+      const val = obj[key];
+      if (val === undefined) continue;
+      if (key === 'companyLogo' || key === 'signature' || key === 'clientSignature') {
+        result[key] = val;
+      } else if (typeof val === 'string' && (val.startsWith('data:') || (val.length > 200 && key.toLowerCase().includes('photo')))) {
+        result[key] = '';
+      } else if (typeof val === 'object' && val !== null) {
+        result[key] = sanitizeDeep(val);
+      } else {
+        result[key] = val;
+      }
+    }
+    return result;
+  };
+
+  const systemAuditLogs = (state.systemAuditLogs || []).slice(0, 300);
+  const deletedMovementsLogs = (state.deletedMovementsLogs || []).slice(0, 300);
+
+  return sanitizeDeep({
+    ...state,
+    movements: strippedMovements,
+    disposableExpeditions: strippedExpeditions,
+    disposableInsumoEntries: strippedInsumos,
+    driverTripLoads: strippedTripLoads,
+    driverTripDeliveries: strippedTripDeliveries,
+    driverSettlements: strippedSettlements,
+    preSales: strippedPreSales,
+    systemAuditLogs,
+    deletedMovementsLogs
+  });
+}
+
+async function saveFullStateToFirestore(db: any, state: any) {
+  if (!db || isFirestoreQuotaExhausted) return;
+  try {
+    const rawClean = stripHeavyDataForServer(state);
+    const cleanState = JSON.parse(JSON.stringify(rawClean));
+
+    const { registeredClients = [], systemAuditLogs = [], deletedMovementsLogs = [], ...mainState } = cleanState;
+
+    const clientChunkCount = Math.ceil(registeredClients.length / 400);
+
+    // 1. Save main state document
+    const mainDocRef = doc(db, "appState", "main");
+    await setDoc(mainDocRef, {
+      ...mainState,
+      _clientChunkCount: clientChunkCount,
+      _updatedAt: new Date().toISOString()
+    });
+
+    // 2. Save logs document
+    const logsDocRef = doc(db, "appState", "logs");
+    await setDoc(logsDocRef, {
+      systemAuditLogs: systemAuditLogs.slice(0, 300),
+      deletedMovementsLogs: deletedMovementsLogs.slice(0, 300)
+    });
+
+    // 3. Save clients in chunks of 400 items (~140KB per chunk document, safely under 1MB limit)
+    for (let i = 0; i < clientChunkCount; i++) {
+      const chunk = registeredClients.slice(i * 400, (i + 1) * 400);
+      const chunkDocRef = doc(db, "appState", `clients_${i}`);
+      await setDoc(chunkDocRef, { clients: chunk });
+    }
+
+    // Legacy fallback: current document with clientChunkCount reference
+    try {
+      const legacyDocRef = doc(db, "appState", "current");
+      await setDoc(legacyDocRef, {
+        ...mainState,
+        _isChunked: true,
+        _clientChunkCount: clientChunkCount,
+        _updatedAt: new Date().toISOString()
+      });
+    } catch (err: any) {
+      console.warn("Legacy current doc write skipped:", err.message);
+    }
+  } catch (err: any) {
+    if (err?.message?.includes('Quota exceeded') || err?.code === 'resource-exhausted' || err?.code === 8) {
+      console.warn("Firestore write quota exceeded on server. Operating in local database.json mode.");
+      isFirestoreQuotaExhausted = true;
+    } else {
+      console.error("Error saving full state to Firestore:", err?.message || err);
+    }
+  }
+}
+
+async function loadFullStateFromFirestore(db: any): Promise<any | null> {
+  if (!db || isFirestoreQuotaExhausted) return null;
+  try {
+    const mainDocRef = doc(db, "appState", "main");
+    const mainSnap = await getDoc(mainDocRef);
+
+    let mainData: any = null;
+    if (mainSnap.exists()) {
+      mainData = mainSnap.data();
+    } else {
+      const currentDocRef = doc(db, "appState", "current");
+      const currentSnap = await getDoc(currentDocRef);
+      if (currentSnap.exists()) {
+        mainData = currentSnap.data();
+      } else {
+        return null;
+      }
+    }
+
+    const clientChunkCount = mainData._clientChunkCount || 0;
+
+    let systemAuditLogs: any[] = mainData.systemAuditLogs || [];
+    let deletedMovementsLogs: any[] = mainData.deletedMovementsLogs || [];
+    try {
+      const logsSnap = await getDoc(doc(db, "appState", "logs"));
+      if (logsSnap.exists()) {
+        const logsData = logsSnap.data();
+        systemAuditLogs = logsData.systemAuditLogs || [];
+        deletedMovementsLogs = logsData.deletedMovementsLogs || [];
+      }
+    } catch (e) {}
+
+    let registeredClients: any[] = mainData.registeredClients || [];
+    if (clientChunkCount > 0) {
+      registeredClients = [];
+      for (let i = 0; i < clientChunkCount; i++) {
+        try {
+          const chunkSnap = await getDoc(doc(db, "appState", `clients_${i}`));
+          if (chunkSnap.exists()) {
+            const chunkData = chunkSnap.data();
+            if (chunkData.clients && Array.isArray(chunkData.clients)) {
+              registeredClients = registeredClients.concat(chunkData.clients);
+            }
+          }
+        } catch (e) {
+          console.warn(`Failed loading client chunk clients_${i}:`, e);
+        }
+      }
+    }
+
+    const { _clientChunkCount, _updatedAt, _isChunked, ...cleanMain } = mainData;
+
+    return {
+      ...cleanMain,
+      registeredClients,
+      systemAuditLogs,
+      deletedMovementsLogs
+    };
+  } catch (err: any) {
+    if (err?.message?.includes('Quota exceeded') || err?.code === 'resource-exhausted' || err?.code === 8) {
+      console.warn("Firestore read quota exceeded on server. Operating in local database.json mode.");
+      isFirestoreQuotaExhausted = true;
+    } else {
+      console.error("Error loading full state from Firestore:", err?.message || err);
+    }
+    return null;
+  }
+}
+
   app.post("/api/state", async (req, res) => {
     try {
-      sharedState = req.body;
+      sharedState = stripHeavyDataForServer(req.body);
       await fs.writeFile(dbPath, JSON.stringify(sharedState, null, 2), "utf-8");
       
-      // Update central state in Cloud Firestore synchronously so that all other clients get notified immediately
-      if (docRef) {
+      // Update central state in Cloud Firestore synchronously using chunking
+      if (activeDb) {
         try {
-          await docRef.set(sharedState);
+          await saveFullStateToFirestore(activeDb, sharedState);
           console.log("Cloud Firestore synchronized successfully via POST api/state.");
         } catch (fErr: any) {
           console.warn("Could not write update to Firestore from server (permission or network limit). Fallback to database.json is active.", fErr.message);

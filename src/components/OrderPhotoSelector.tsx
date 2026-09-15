@@ -4,11 +4,15 @@ import { Camera, Image, Check, X, RefreshCw, AlertCircle } from 'lucide-react';
 interface OrderPhotoSelectorProps {
   onPhotoSelected: (base64Photo: string | null) => void;
   selectedPhoto: string | null;
+  label?: React.ReactNode;
+  previewLabel?: string;
 }
 
 export const OrderPhotoSelector: React.FC<OrderPhotoSelectorProps> = ({
   onPhotoSelected,
   selectedPhoto,
+  label,
+  previewLabel,
 }) => {
   const [mode, setMode] = useState<'idle' | 'camera' | 'gallery'>('idle');
   const [cameraActive, setCameraActive] = useState(false);
@@ -126,14 +130,18 @@ export const OrderPhotoSelector: React.FC<OrderPhotoSelectorProps> = ({
   return (
     <div className="mt-3 border border-slate-200 rounded-lg p-3 bg-slate-50/50">
       <label className="block text-[11px] font-bold text-slate-600 uppercase tracking-wide mb-2 text-left">
-        Foto do Pedido de Venda/Produção <span className="text-amber-600 font-normal italic">(Solicitado para veículos da produção)</span>
+        {label || (
+          <>
+            Foto do Pedido de Venda/Produção <span className="text-amber-600 font-normal italic">(Solicitado para veículos da produção)</span>
+          </>
+        )}
       </label>
 
       {/* Preview of the Selected Photo */}
       {selectedPhoto ? (
         <div className="relative border border-slate-205 rounded-lg overflow-hidden bg-white shadow-xs max-w-full">
           <img
-            src={selectedPhoto}
+            src={selectedPhoto || undefined}
             alt="Pedido"
             className="w-full h-40 object-contain bg-slate-900"
             referrerPolicy="no-referrer"
@@ -149,7 +157,7 @@ export const OrderPhotoSelector: React.FC<OrderPhotoSelectorProps> = ({
             </button>
           </div>
           <div className="bg-slate-900/80 text-white text-[10px] uppercase font-bold py-1 px-2.5 flex items-center justify-between">
-            <span>Imagem do Pedido Carregada</span>
+            <span>{previewLabel || 'Imagem do Pedido Carregada'}</span>
             <span className="text-emerald-400 font-black">Pronto ✓</span>
           </div>
         </div>

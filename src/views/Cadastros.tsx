@@ -1,21 +1,28 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
 import { useStore, normalizeOccurrenceTypeName, cleanOccurrenceTypeName } from '../store';
-import { RegisteredVehicle, RegisteredDriver, VehicleType, OwnerType, RegisteredClient } from '../types';
-import { Plus, Trash2, Truck, UserCheck, Search, Tag, AlertCircle, Users, Briefcase, XCircle, Edit, Check, X } from 'lucide-react';
+import { RegisteredVehicle, RegisteredDriver, VehicleType, OwnerType, RegisteredClient, Movement } from '../types';
+import { Plus, Trash2, Truck, UserCheck, Search, Tag, AlertCircle, Users, Briefcase, XCircle, Edit, Check, X, MapPin } from 'lucide-react';
 
 export const Cadastros: React.FC = () => {
   const {
     registeredVehicles = [],
     registeredDrivers = [],
+    registeredSupervisors = [],
     registeredClients = [],
+    registeredCities = [],
     addRegisteredVehicle,
     removeRegisteredVehicle,
     addRegisteredDriver,
     removeRegisteredDriver,
     updateRegisteredDriver,
+    addRegisteredSupervisor,
+    removeRegisteredSupervisor,
+    updateRegisteredSupervisor,
     addRegisteredClient,
     removeRegisteredClient,
     updateRegisteredClient,
+    addRegisteredCity,
+    removeRegisteredCity,
     customVehicleCategories = [],
     customEntryPurposes = [],
     addCustomVehicleCategory,
@@ -26,6 +33,7 @@ export const Cadastros: React.FC = () => {
     setCompanyLogo,
     clearDatabase,
     movements = [],
+    addMovement,
     updateRegisteredVehicleDriver,
     updateRegisteredVehicle,
     currentUser,
@@ -35,9 +43,11 @@ export const Cadastros: React.FC = () => {
     updateCustomAvariaType,
   } = useStore();
 
-  const isReadOnly = currentUser?.role === 'visualizador';
+  const isReadOnly = currentUser?.role === 'visualizador' || currentUser?.role === 'supervisor';
 
   // Custom Occurrence Form State (Avarias / +Compra)
+  const [newCityName, setNewCityName] = useState('');
+  const [newCityUf, setNewCityUf] = useState('');
   const [newOccurrenceName, setNewOccurrenceName] = useState('');
   const [newOccurrenceType, setNewOccurrenceType] = useState<'avaria' | 'compra'>('avaria');
   const [newOccurrenceClassification, setNewOccurrenceClassification] = useState<'descarregamento' | 'carregamento' | 'ambos'>('ambos');
@@ -57,6 +67,10 @@ export const Cadastros: React.FC = () => {
   const [vehicleModel, setVehicleModel] = useState('');
   const [defaultDriverId, setDefaultDriverId] = useState('');
   const [vehicleAverageVasilhames, setVehicleAverageVasilhames] = useState('');
+  const [vehicleInitialTripQty, setVehicleInitialTripQty] = useState('');
+  const [vehicleInitialTripDriverId, setVehicleInitialTripDriverId] = useState('');
+  const [vehicleBypassProductionDefault, setVehicleBypassProductionDefault] = useState<boolean>(false);
+  const [vehicleDefaultPurposeId, setVehicleDefaultPurposeId] = useState('');
 
   // Fallback default vehicle type to first valid category if list exists
   React.useEffect(() => {
@@ -74,6 +88,18 @@ export const Cadastros: React.FC = () => {
   const [editingDriverName, setEditingDriverName] = useState<string>('');
   const [editingDriverCommissionPercent, setEditingDriverCommissionPercent] = useState<number>(8);
   const [editingDriverDamageToleranceQty, setEditingDriverDamageToleranceQty] = useState<number>(0);
+
+  // Supervisor Form State
+  const [supervisorName, setSupervisorName] = useState('');
+  const [supervisorPhone, setSupervisorPhone] = useState('');
+  const [supervisorActive, setSupervisorActive] = useState<boolean>(true);
+  const [supervisorError, setSupervisorError] = useState('');
+  const [supervisorSuccess, setSupervisorSuccess] = useState('');
+  const [searchSupervisorQuery, setSearchSupervisorQuery] = useState('');
+  const [editingSupervisorId, setEditingSupervisorId] = useState<string>('');
+  const [editingSupervisorName, setEditingSupervisorName] = useState<string>('');
+  const [editingSupervisorPhone, setEditingSupervisorPhone] = useState<string>('');
+  const [editingSupervisorActive, setEditingSupervisorActive] = useState<boolean>(true);
 
   // Vehicle Editing State
   const [editingVehicleId, setEditingVehicleId] = useState<string>('');
@@ -191,6 +217,21 @@ export const Cadastros: React.FC = () => {
       return;
     }
 
+    const initQty = vehicleInitialTripQty.trim() ? parseInt(vehicleInitialTripQty, 10) : 0;
+    let initialTripDriverName = '';
+    if (initQty > 0) {
+      if (!vehicleInitialTripDriverId) {
+        setVehicleError('Selecione o motorista responsável pela viagem inicial.');
+        return;
+      }
+      const drv = registeredDrivers.find(d => d.id === vehicleInitialTripDriverId);
+      if (!drv) {
+        setVehicleError('Motorista selecionado para a viagem inicial inválido.');
+        return;
+      }
+      initialTripDriverName = drv.name;
+    }
+
     const newVehicle: RegisteredVehicle = {
       id: 'veh-' + Date.now().toString(36),
       plate: formattedPlate,
@@ -198,14 +239,52 @@ export const Cadastros: React.FC = () => {
       ownerType: vehicleOwnerType,
       model: vehicleModel.trim() || undefined,
       defaultDriverId: defaultDriverId || undefined,
-      averageVasilhames: avgVasilhames
+      averageVasilhames: avgVasilhames,
+      bypassProductionDefault: vehicleBypassProductionDefault,
+      defaultPurposeId: vehicleDefaultPurposeId || undefined
     };
 
     addRegisteredVehicle(newVehicle);
+
+    if (initQty > 0) {
+      const newMov: Movement = {
+        id: 'mov-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 5),
+        plate: formattedPlate,
+        driver: initialTripDriverName,
+        ownerType: 'proprio',
+        vehicleType: vehicleType,
+        type: 'saida',
+        status: 'saida',
+        isInitialTrip: true,
+        timestamp: new Date().toISOString(),
+        exitTimestamp: new Date().toISOString(),
+        unit: currentUser?.unit || 'matriz',
+        checklist: {
+          brakes: true,
+          tires: true,
+          lights: true,
+          leaks: false,
+          passed: true,
+          notes: 'Carga inicial gerada automaticamente via pré-cadastro do veículo.'
+        },
+        productionControl: {
+          descarregadoQty: 0,
+          avariasDescarregamento: [],
+          avariasCarregamento: [],
+          totalCarregado: initQty,
+        }
+      };
+      addMovement(newMov);
+    }
+
     setVehiclePlate('');
     setVehicleModel('');
     setDefaultDriverId('');
     setVehicleAverageVasilhames('');
+    setVehicleInitialTripQty('');
+    setVehicleInitialTripDriverId('');
+    setVehicleBypassProductionDefault(false);
+    setVehicleDefaultPurposeId('');
     setVehicleSuccess('Veículo pré-cadastrado com sucesso!');
     setTimeout(() => setVehicleSuccess(''), 3000);
   };
@@ -245,8 +324,43 @@ export const Cadastros: React.FC = () => {
     setTimeout(() => setDriverSuccess(''), 3000);
   };
 
+  const handleCreateSupervisor = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isReadOnly) return;
+    setSupervisorError('');
+    setSupervisorSuccess('');
+
+    const formattedName = supervisorName.trim();
+    if (!formattedName) {
+      setSupervisorError('O nome do supervisor de vendas é obrigatório.');
+      return;
+    }
+
+    const exists = (registeredSupervisors || []).some(s => s.name.toLowerCase().trim() === formattedName.toLowerCase());
+    if (exists) {
+      setSupervisorError(`O supervisor "${formattedName}" já está cadastrado.`);
+      return;
+    }
+
+    addRegisteredSupervisor({
+      id: `sup-${Date.now()}`,
+      name: formattedName,
+      phone: supervisorPhone.trim() || undefined,
+      active: supervisorActive,
+      createdAt: new Date().toISOString(),
+      unit: currentUser?.unit || 'matriz'
+    });
+
+    setSupervisorName('');
+    setSupervisorPhone('');
+    setSupervisorActive(true);
+    setSupervisorSuccess('Supervisor de vendas cadastrado com sucesso!');
+    setTimeout(() => setSupervisorSuccess(''), 3000);
+  };
+
   // Logo Settings State
   const [logoInput, setLogoInput] = useState(companyLogo || '');
+  const [logoSuccessMsg, setLogoSuccessMsg] = useState('');
 
   // Sync state if store updates
   React.useEffect(() => {
@@ -293,6 +407,8 @@ export const Cadastros: React.FC = () => {
             
             setLogoInput(compressedBase64);
             setCompanyLogo(compressedBase64);
+            setLogoSuccessMsg('Logomarca enviada e salva com sucesso!');
+            setTimeout(() => setLogoSuccessMsg(''), 4000);
           }
         };
         img.src = event.target?.result as string;
@@ -303,13 +419,18 @@ export const Cadastros: React.FC = () => {
 
   const handleSaveLogoLink = () => {
     if (isReadOnly) return;
-    setCompanyLogo(logoInput);
+    if (!logoInput.trim()) return;
+    setCompanyLogo(logoInput.trim());
+    setLogoSuccessMsg('Link da logomarca salvo com sucesso!');
+    setTimeout(() => setLogoSuccessMsg(''), 4000);
   };
 
   const handleRemoveLogo = () => {
     if (isReadOnly) return;
     setLogoInput('');
     setCompanyLogo('');
+    setLogoSuccessMsg('Logomarca removida com sucesso.');
+    setTimeout(() => setLogoSuccessMsg(''), 4000);
   };
 
   // Custom Category Form State
@@ -329,7 +450,7 @@ export const Cadastros: React.FC = () => {
       clearDatabase();
       setShowClearConfirm(false);
       setClearConfirmText('');
-      alert('Toda a base de movimentações e abastecimentos foi limpa com sucesso!');
+      alert('Toda a base de dados, cadastros de veículos/motoristas/clientes, configurações e usuários do sistema foram limpos com sucesso!');
     } else {
       alert('Por favor, digite ZERAR em letras maiúsculas para confirmar a limpeza.');
     }
@@ -396,6 +517,26 @@ export const Cadastros: React.FC = () => {
     });
     setNewPurpName('');
     setNewPurpBypass(false);
+  };
+
+  const handleAddCity = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isReadOnly) return;
+    const name = newCityName.trim();
+    if (!name) return;
+
+    if (registeredCities.some(c => c.name.toLowerCase().trim() === name.toLowerCase().trim())) {
+      alert('Esta cidade já está pré-cadastrada.');
+      return;
+    }
+
+    addRegisteredCity({
+      id: 'city-' + Date.now().toString(36),
+      name,
+      uf: newCityUf.trim().toUpperCase() || undefined
+    });
+    setNewCityName('');
+    setNewCityUf('');
   };
 
   const handleCreateClient = (e: React.FormEvent) => {
@@ -764,31 +905,67 @@ export const Cadastros: React.FC = () => {
     e.target.value = '';
   };
 
+  // Memoized Lookup Maps & Sets for O(1) performance during renders and typing
+  const vehiclesById = useMemo(() => new Map(registeredVehicles.map(v => [v.id, v])), [registeredVehicles]);
+  const driversById = useMemo(() => new Map(registeredDrivers.map(d => [d.id, d])), [registeredDrivers]);
+
+  const linkedVehiclesSet = useMemo(() => {
+    const set = new Set<string>();
+    registeredClients.forEach(c => {
+      (c.vehicleIds || []).forEach(id => set.add(id));
+      if (c.defaultVehicleId) set.add(c.defaultVehicleId);
+    });
+    return set;
+  }, [registeredClients]);
+
+  const linkedDriversSet = useMemo(() => {
+    const set = new Set<string>();
+    registeredClients.forEach(c => {
+      (c.driverIds || []).forEach(id => set.add(id));
+      if (c.defaultDriverId) set.add(c.defaultDriverId);
+    });
+    return set;
+  }, [registeredClients]);
+
+  const driverToVehicleMap = useMemo(() => {
+    const map = new Map<string, RegisteredVehicle>();
+    registeredVehicles.forEach(v => {
+      if (v.defaultDriverId) {
+        map.set(v.defaultDriverId, v);
+      }
+    });
+    return map;
+  }, [registeredVehicles]);
+
   // Filtered lists
-  const filteredVehicles = registeredVehicles.filter(v => {
-    const query = searchVehicleQuery.toLowerCase().trim();
-    if (!query) return true;
-    const matchesPlate = v.plate.toLowerCase().includes(query);
-    const matchesModel = v.model ? v.model.toLowerCase().includes(query) : false;
-    const linkedDrv = registeredDrivers.find(d => d.id === v.defaultDriverId);
-    const matchesDriver = linkedDrv ? linkedDrv.name.toLowerCase().includes(query) : false;
-    return matchesPlate || matchesModel || matchesDriver;
-  });
+  const filteredVehicles = useMemo(() => {
+    return registeredVehicles.filter(v => {
+      const query = searchVehicleQuery.toLowerCase().trim();
+      if (!query) return true;
+      const matchesPlate = v.plate.toLowerCase().includes(query);
+      const matchesModel = v.model ? v.model.toLowerCase().includes(query) : false;
+      const linkedDrv = v.defaultDriverId ? driversById.get(v.defaultDriverId) : undefined;
+      const matchesDriver = linkedDrv ? linkedDrv.name.toLowerCase().includes(query) : false;
+      return matchesPlate || matchesModel || matchesDriver;
+    });
+  }, [registeredVehicles, searchVehicleQuery, driversById]);
 
-  const availableDriversForNewVehicle = registeredDrivers.filter(d => {
-    const matchesOwner =
-      vehicleOwnerType === 'proprio'
-        ? d.driverType === 'interno'
-        : d.driverType === 'cliente';
+  const availableDriversForNewVehicle = useMemo(() => {
+    return registeredDrivers.filter(d => {
+      const matchesOwner =
+        vehicleOwnerType === 'proprio'
+          ? d.driverType === 'interno'
+          : d.driverType === 'cliente';
 
-    if (!matchesOwner) return false;
+      if (!matchesOwner) return false;
 
-    // Filter out drivers already linked to a vehicle
-    const isAlreadyLinked = registeredVehicles.some(v => v.defaultDriverId === d.id);
-    return !isAlreadyLinked;
-  });
+      // Filter out drivers already linked to a vehicle
+      const isAlreadyLinked = driverToVehicleMap.has(d.id);
+      return !isAlreadyLinked;
+    });
+  }, [registeredDrivers, vehicleOwnerType, driverToVehicleMap]);
 
-  const getAvailableDriversForExistingVehicle = (v: RegisteredVehicle) => {
+  const getAvailableDriversForExistingVehicle = useCallback((v: RegisteredVehicle) => {
     return registeredDrivers.filter(d => {
       const matchesOwner =
         v.ownerType === 'proprio'
@@ -798,44 +975,49 @@ export const Cadastros: React.FC = () => {
       if (!matchesOwner) return false;
 
       // Filter out drivers linked to other vehicles
-      const isLinkedToOther = registeredVehicles.some(oth => oth.id !== v.id && oth.defaultDriverId === d.id);
+      const linkedVeh = driverToVehicleMap.get(d.id);
+      const isLinkedToOther = linkedVeh !== undefined && linkedVeh.id !== v.id;
       return !isLinkedToOther;
     });
-  };
+  }, [registeredDrivers, driverToVehicleMap]);
 
-  const filteredDrivers = registeredDrivers.filter(d =>
-    d.name.toLowerCase().includes(searchDriverQuery.toLowerCase().trim())
-  );
+  const filteredDrivers = useMemo(() => {
+    return registeredDrivers.filter(d =>
+      d.name.toLowerCase().includes(searchDriverQuery.toLowerCase().trim())
+    );
+  }, [registeredDrivers, searchDriverQuery]);
 
-  const filteredClients = registeredClients
-    .filter(c => {
-      if (filterOnlyCompanyClients && !c.comprasNaEmpresa) {
-        return false;
-      }
-      const query = searchClientQuery.toLowerCase().trim();
-      if (!query) return true;
-      const nameMatch = c.name.toLowerCase().includes(query);
-      const codeMatch = c.codigo ? c.codigo.toLowerCase().includes(query) : false;
-      const fantasyMatch = c.apelidoFantasia ? c.apelidoFantasia.toLowerCase().includes(query) : false;
-      return nameMatch || codeMatch || fantasyMatch;
-    })
-    .sort((a, b) => {
-      const codeA = parseInt(a.codigo || '', 10);
-      const codeB = parseInt(b.codigo || '', 10);
-      const isANum = !isNaN(codeA) && /^\d+$/.test((a.codigo || '').trim());
-      const isBNum = !isNaN(codeB) && /^\d+$/.test((b.codigo || '').trim());
-      if (isANum && isBNum) {
-        return codeA - codeB;
-      }
-      if (isANum) return -1;
-      if (isBNum) return 1;
-      const valA = a.codigo || '';
-      const valB = b.codigo || '';
-      if (valA || valB) {
-        return valA.localeCompare(valB, undefined, { numeric: true, sensitivity: 'base' });
-      }
-      return a.name.localeCompare(b.name);
-    });
+  const filteredClients = useMemo(() => {
+    return registeredClients
+      .filter(c => {
+        if (filterOnlyCompanyClients && !c.comprasNaEmpresa) {
+          return false;
+        }
+        const query = searchClientQuery.toLowerCase().trim();
+        if (!query) return true;
+        const nameMatch = c.name.toLowerCase().includes(query);
+        const codeMatch = c.codigo ? c.codigo.toLowerCase().includes(query) : false;
+        const fantasyMatch = c.apelidoFantasia ? c.apelidoFantasia.toLowerCase().includes(query) : false;
+        return nameMatch || codeMatch || fantasyMatch;
+      })
+      .sort((a, b) => {
+        const codeA = parseInt(a.codigo || '', 10);
+        const codeB = parseInt(b.codigo || '', 10);
+        const isANum = !isNaN(codeA) && /^\d+$/.test((a.codigo || '').trim());
+        const isBNum = !isNaN(codeB) && /^\d+$/.test((b.codigo || '').trim());
+        if (isANum && isBNum) {
+          return codeA - codeB;
+        }
+        if (isANum) return -1;
+        if (isBNum) return 1;
+        const valA = a.codigo || '';
+        const valB = b.codigo || '';
+        if (valA || valB) {
+          return valA.localeCompare(valB, undefined, { numeric: true, sensitivity: 'base' });
+        }
+        return a.name.localeCompare(b.name);
+      });
+  }, [registeredClients, filterOnlyCompanyClients, searchClientQuery]);
 
   return (
     <div className="space-y-6">
@@ -887,10 +1069,16 @@ export const Cadastros: React.FC = () => {
                 </div>
                 
                 {/* Logo Preview */}
+                {logoSuccessMsg && (
+                  <div className="p-2 bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-bold rounded-lg text-center animate-fade-in">
+                    {logoSuccessMsg}
+                  </div>
+                )}
+
                 <div className="p-3 bg-slate-55 rounded border border-slate-200 flex flex-col items-center justify-center min-h-[100px] text-center bg-slate-50">
                   {companyLogo ? (
                     <div className="space-y-2">
-                      <img src={companyLogo} alt="Logomarca salva" className="max-h-16 max-w-[180px] object-contain mx-auto rounded p-1 bg-white border border-slate-200 shadow-xs" referrerPolicy="no-referrer" />
+                      <img src={companyLogo || undefined} alt="Logomarca salva" className="max-h-16 max-w-[180px] object-contain mx-auto rounded p-1 bg-white border border-slate-200 shadow-xs" referrerPolicy="no-referrer" />
                       <button
                         onClick={handleRemoveLogo}
                         className="text-[10px] font-bold text-red-600 hover:text-red-700 hover:underline block mx-auto uppercase"
@@ -1447,661 +1635,100 @@ export const Cadastros: React.FC = () => {
               </div>
             </div>
 
+            {/* TERCEIRA LINHA: PRÉ-CADASTRO DE CIDADES */}
+            <div className="grid grid-cols-1 xl:grid-cols-1 gap-6 mt-6 pt-6 border-t border-slate-200">
+              <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-xs flex flex-col">
+                <div className="border-b border-slate-100 pb-3 flex items-center space-x-1.5 text-slate-700 mb-4">
+                  <MapPin size={16} className="text-blue-600" />
+                  <h4 className="text-xs font-black uppercase tracking-wider font-bold">Cidades de Viagem (Prestação de Contas)</h4>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  {/* Form */}
+                  <form onSubmit={handleAddCity} className="space-y-4 bg-slate-50 p-4 rounded-xl border border-slate-200 md:col-span-1">
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                        Nome da Cidade
+                      </label>
+                      <input
+                        type="text"
+                        required
+                        placeholder="Ex: Ribeirão Preto, Campinas, São Carlos"
+                        value={newCityName}
+                        onChange={e => setNewCityName(e.target.value)}
+                        className="w-full bg-white border border-slate-200 rounded text-xs p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                        Estado (UF)
+                      </label>
+                      <input
+                        type="text"
+                        maxLength={2}
+                        placeholder="Ex: SP, RJ, MG"
+                        value={newCityUf}
+                        onChange={e => setNewCityUf(e.target.value.toUpperCase())}
+                        className="w-full bg-white border border-slate-200 rounded text-xs p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400"
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs uppercase p-2.5 rounded tracking-wider flex items-center justify-center gap-1.5 shadow-sm transition-colors"
+                    >
+                      <Plus size={15} /> Adicionar Cidade
+                    </button>
+                  </form>
+
+                  {/* List Table */}
+                  <div className="md:col-span-2 overflow-hidden flex flex-col">
+                    <div className="overflow-x-auto border border-slate-100 rounded-lg">
+                      <table className="w-full text-left border-collapse text-xs">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-100 text-slate-500 uppercase text-[10px] font-bold">
+                            <th className="p-3">Cidade</th>
+                            <th className="p-3">UF</th>
+                            <th className="p-3 text-right">Ações</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 font-medium">
+                          {registeredCities && registeredCities.length > 0 ? (
+                            registeredCities.map(city => (
+                              <tr key={city.id} className="hover:bg-slate-50/60 transition-colors">
+                                <td className="p-3 text-slate-800 font-bold">{city.name}</td>
+                                <td className="p-3 text-slate-600 uppercase">{city.uf || '-'}</td>
+                                <td className="p-3 text-right">
+                                  <button
+                                    type="button"
+                                    onClick={() => removeRegisteredCity(city.id)}
+                                    className="text-red-500 hover:text-red-700 transition p-1 hover:bg-slate-100 rounded"
+                                    title="Remover Cidade"
+                                  >
+                                    <Trash2 size={14} className="inline" />
+                                  </button>
+                                </td>
+                              </tr>
+                            ))
+                          ) : (
+                            <tr>
+                              <td colSpan={3} className="p-4 text-center text-slate-400 italic">
+                                Nenhuma cidade cadastrada para viagens.
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
           </div>
         )}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-
-        {/* 1. SECTION: MOTORISTAS DA EMPRESA */}
-        <div className="space-y-6 flex flex-col">
-          {/* Card Form */}
-          <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex-1">
-            <div className="flex items-center space-x-2 border-b border-slate-100 pb-3 mb-4">
-              <UserCheck size={18} className="text-blue-600" />
-              <h2 className="text-sm font-bold text-slate-800 uppercase tracking-tight">Pré-Cadastro de Motoristas</h2>
-            </div>
-
-            <form onSubmit={handleCreateDriver} className="space-y-4">
-              <div>
-                <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
-                  Nome Completo
-                </label>
-                <input
-                  type="text"
-                  required
-                  value={driverName}
-                  onChange={e => setDriverName(e.target.value)}
-                  placeholder="Ex: Carlos Eduardo de Souza"
-                  className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
-                  Vínculo / Tipo de Motorista
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setDriverType('interno')}
-                    className={`p-2 rounded text-xs font-semibold border transition ${
-                      driverType === 'interno'
-                        ? 'border-blue-500 bg-blue-50 text-blue-700'
-                        : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
-                    }`}
-                  >
-                    Próprio / CLT da Empresa
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setDriverType('cliente')}
-                    className={`p-2 rounded text-xs font-semibold border transition ${
-                      driverType === 'cliente'
-                        ? 'border-blue-500 bg-blue-50 text-blue-700'
-                        : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
-                    }`}
-                  >
-                    Cliente / Outros
-                  </button>
-                </div>
-              </div>
-
-              {driverType === 'interno' && (
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
-                      Comissão (%)
-                    </label>
-                    <input
-                      type="number"
-                      min="0"
-                      max="100"
-                      step="0.1"
-                      required
-                      value={driverCommissionPercent}
-                      onChange={e => setDriverCommissionPercent(parseFloat(e.target.value) || 0)}
-                      className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm font-semibold"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
-                      Limite de Avarias
-                    </label>
-                    <input
-                      type="number"
-                      min="0"
-                      required
-                      value={driverDamageToleranceQty}
-                      onChange={e => setDriverDamageToleranceQty(parseInt(e.target.value) || 0)}
-                      className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm font-semibold"
-                      placeholder="Qtd permitida"
-                    />
-                  </div>
-                </div>
-              )}
-
-              {driverError && (
-                <div className="p-2.5 bg-rose-50 text-rose-700 text-xs rounded font-medium flex items-center gap-2">
-                  <AlertCircle size={14} />
-                  <span>{driverError}</span>
-                </div>
-              )}
-
-              {driverSuccess && (
-                <div className="p-2.5 bg-emerald-50 text-emerald-700 text-xs rounded font-medium">
-                  {driverSuccess}
-                </div>
-              )}
-
-              <button
-                type="submit"
-                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs uppercase tracking-wider p-2.5 rounded shadow transition-colors flex items-center justify-center gap-1.5"
-              >
-                <Plus size={16} />
-                Salvar Motorista
-              </button>
-            </form>
-          </div>
-
-          {/* List Card */}
-          <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col h-[400px]">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4 border-b border-slate-100 pb-3 h-auto">
-              <h2 className="text-xs font-bold text-slate-600 uppercase tracking-wider">Lista de Motoristas Cadastrados</h2>
-              <div className="relative">
-                <Search size={14} className="absolute left-2.5 top-2.5 text-slate-400" />
-                <input
-                  type="text"
-                  placeholder="Buscar motorista..."
-                  value={searchDriverQuery}
-                  onChange={e => setSearchDriverQuery(e.target.value)}
-                  className="bg-slate-55 text-xs border border-slate-200 pl-8 pr-3 py-1.5 rounded outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 w-full sm:w-48"
-                />
-              </div>
-            </div>
-
-            <div className="flex-1 overflow-auto pr-1">
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="border-b border-slate-100 text-slate-400">
-                    <th className="pb-2 font-bold uppercase text-[10px]">Nome</th>
-                    <th className="pb-2 font-bold uppercase text-[10px]">Vínculo</th>
-                    <th className="pb-2 font-bold uppercase text-[10px]">Comissão</th>
-                    <th className="pb-2 font-bold uppercase text-[10px]">Lim. Avarias</th>
-                    <th className="pb-2 text-right font-bold uppercase text-[10px]">Ações</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-50 font-medium">
-                  {filteredDrivers.map(d => (
-                    <tr key={d.id} className="hover:bg-slate-50">
-                      <td className="py-2.5 text-slate-900 font-semibold">
-                        {editingDriverId === d.id ? (
-                          <input
-                            type="text"
-                            value={editingDriverName}
-                            onChange={(e) => setEditingDriverName(e.target.value)}
-                            className="bg-white border border-slate-300 rounded text-xs px-2 py-1 font-semibold text-slate-700 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 w-full"
-                            autoFocus
-                          />
-                        ) : (
-                          d.name
-                        )}
-                      </td>
-                      <td className="py-2.5">
-                        <span className={`px-1.5 py-0.5 rounded text-[9px] uppercase font-bold ${
-                          d.driverType === 'interno' ? 'bg-cyan-100 text-cyan-700' : 'bg-emerald-100 text-emerald-700'
-                        }`}>
-                          {d.driverType === 'interno' ? 'Interno' : 'Cliente'}
-                        </span>
-                      </td>
-                      <td className="py-2.5 font-bold text-slate-700">
-                        {editingDriverId === d.id ? (
-                          d.driverType === 'interno' ? (
-                            <input
-                              type="number"
-                              min="0"
-                              max="100"
-                              step="0.1"
-                              value={editingDriverCommissionPercent}
-                              onChange={(e) => setEditingDriverCommissionPercent(parseFloat(e.target.value) || 0)}
-                              className="bg-white border border-slate-300 rounded text-xs px-2 py-1 font-bold text-slate-700 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 w-16"
-                            />
-                          ) : (
-                            <span className="text-slate-400 italic text-[10px] font-normal">-</span>
-                          )
-                        ) : (
-                          d.driverType === 'interno' ? `${d.commissionPercent ?? 8}%` : '-'
-                        )}
-                      </td>
-                      <td className="py-2.5 font-bold text-slate-700">
-                        {editingDriverId === d.id ? (
-                          d.driverType === 'interno' ? (
-                            <input
-                              type="number"
-                              min="0"
-                              value={editingDriverDamageToleranceQty}
-                              onChange={(e) => setEditingDriverDamageToleranceQty(parseInt(e.target.value) || 0)}
-                              className="bg-white border border-slate-300 rounded text-xs px-2 py-1 font-bold text-slate-700 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 w-16"
-                            />
-                          ) : (
-                            <span className="text-slate-400 italic text-[10px] font-normal">-</span>
-                          )
-                        ) : (
-                          d.driverType === 'interno' ? `${d.damageToleranceQty ?? 0} un` : '-'
-                        )}
-                      </td>
-                      <td className="py-2.5 text-right">
-                        <div className="flex items-center justify-end gap-1.5">
-                          {editingDriverId === d.id ? (
-                            <>
-                              <button
-                                onClick={() => {
-                                  const nextVal = editingDriverName.trim();
-                                  if (nextVal !== '') {
-                                    updateRegisteredDriver(d.id, { 
-                                      name: nextVal,
-                                      commissionPercent: d.driverType === 'interno' ? editingDriverCommissionPercent : undefined,
-                                      damageToleranceQty: d.driverType === 'interno' ? editingDriverDamageToleranceQty : undefined
-                                    });
-                                  }
-                                  setEditingDriverId('');
-                                  setEditingDriverName('');
-                                }}
-                                className="p-1 text-green-600 hover:text-green-800 transition cursor-pointer"
-                                title="Salvar"
-                              >
-                                <Check size={14} />
-                              </button>
-                              <button
-                                onClick={() => {
-                                  setEditingDriverId('');
-                                  setEditingDriverName('');
-                                }}
-                                className="p-1 text-slate-400 hover:text-slate-600 transition cursor-pointer"
-                                title="Cancelar"
-                              >
-                                <X size={14} />
-                              </button>
-                            </>
-                          ) : (
-                            <>
-                              {!isReadOnly && (
-                                <button
-                                  onClick={() => {
-                                    setEditingDriverId(d.id);
-                                    setEditingDriverName(d.name);
-                                    setEditingDriverCommissionPercent(d.commissionPercent ?? 8);
-                                    setEditingDriverDamageToleranceQty(d.damageToleranceQty ?? 0);
-                                  }}
-                                  className="p-1 hover:text-blue-600 text-slate-400 transition cursor-pointer"
-                                  title="Editar Nome/Comissão/Avarias do Motorista"
-                                >
-                                  <Edit size={14} />
-                                </button>
-                              )}
-                              <button
-                                onClick={() => removeRegisteredDriver(d.id)}
-                                disabled={isReadOnly}
-                                className="p-1 hover:text-red-600 text-slate-400 transition cursor-pointer disabled:opacity-50"
-                                title="Remover Cadastro"
-                              >
-                                <Trash2 size={14} />
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                  {filteredDrivers.length === 0 && (
-                    <tr>
-                      <td colSpan={3} className="py-8 text-center text-slate-400 uppercase tracking-wide text-[10px]">
-                        Nenhum motorista cadastrado.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-
-
-        {/* 2. SECTION: PRÉ-CADASTRO DE VEÍCULOS */}
-        <div className="space-y-6 flex flex-col">
-          {/* Card Form */}
-          <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex-1">
-            <div className="flex items-center space-x-2 border-b border-slate-100 pb-3 mb-4">
-              <Truck size={18} className="text-blue-600" />
-              <h2 className="text-sm font-bold text-slate-800 uppercase tracking-tight">Pré-Cadastro de Veículos</h2>
-            </div>
-
-            <form onSubmit={handleCreateVehicle} className="space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
-                    Placa do Veículo
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={vehiclePlate}
-                    onChange={e => setVehiclePlate(e.target.value)}
-                    placeholder="Ex: ABC-1234, ABC1D23"
-                    className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm uppercase font-mono tracking-widest font-semibold"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
-                    Proprietário
-                  </label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setVehicleOwnerType('proprio')}
-                      className={`p-2 rounded text-xs font-semibold border transition ${
-                        vehicleOwnerType === 'proprio'
-                          ? 'border-blue-500 bg-blue-50 text-blue-700'
-                          : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
-                      }`}
-                    >
-                      Frota Própria
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setVehicleOwnerType('terceiro')}
-                      className={`p-2 rounded text-xs font-semibold border transition ${
-                        vehicleOwnerType === 'terceiro'
-                          ? 'border-blue-500 bg-blue-50 text-blue-700'
-                          : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
-                      }`}
-                    >
-                      Terceiro / Cliente
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
-                    Tipo do Veículo
-                  </label>
-                  <select
-                    value={vehicleType}
-                    onChange={e => setVehicleType(e.target.value)}
-                    className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm"
-                  >
-                    {customVehicleCategories.map(cat => (
-                      <option key={cat.id} value={cat.id}>
-                        {cat.name} {cat.bypassProductionDefault ? '(Ignora Fila)' : '(Vai p/ Fila)'}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
-                    Modelo ou Descrição (Opcional)
-                  </label>
-                  <input
-                    type="text"
-                    value={vehicleModel}
-                    onChange={e => setVehicleModel(e.target.value)}
-                    placeholder="Ex: Scania R450 Vermelha"
-                    className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
-                    Motorista Pré-Vinculado (Preenchimento Automático)
-                  </label>
-                  <select
-                    value={defaultDriverId}
-                    onChange={e => setDefaultDriverId(e.target.value)}
-                    className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm"
-                  >
-                    <option value="">Nenhum motorista pré-vinculado</option>
-                    {availableDriversForNewVehicle.map(d => (
-                      <option key={d.id} value={d.id}>
-                        {d.name} ({d.driverType === 'interno' ? 'Frota' : 'Cliente'})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
-                    Média de Vasilhames / Carga (Cálculo Fila)
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    placeholder="Ex: 50"
-                    value={vehicleAverageVasilhames}
-                    onChange={e => setVehicleAverageVasilhames(e.target.value)}
-                    className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm font-semibold text-slate-700"
-                  />
-                </div>
-              </div>
-              <p className="text-[10px] text-slate-400 mt-1">
-                A média de vasilhames serve como estimativa padrão para o cálculo de tempo de descarregamento antes da pesagem/registro definitivo. Isso melhora a precisão na fila de espera sem afetar os dados de produção.
-              </p>
-
-              {vehicleError && (
-                <div className="p-2.5 bg-rose-50 text-rose-700 text-xs rounded font-medium flex items-center gap-2">
-                  <AlertCircle size={14} />
-                  <span>{vehicleError}</span>
-                </div>
-              )}
-
-              {vehicleSuccess && (
-                <div className="p-2.5 bg-emerald-50 text-emerald-700 text-xs rounded font-medium">
-                  {vehicleSuccess}
-                </div>
-              )}
-
-              <button
-                type="submit"
-                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs uppercase tracking-wider p-2.5 rounded shadow transition-colors flex items-center justify-center gap-1.5"
-              >
-                <Plus size={16} />
-                Salvar Veículo
-              </button>
-            </form>
-          </div>
-
-          {/* List Card */}
-          <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col h-[400px]">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4 border-b border-slate-100 pb-3 h-auto">
-              <h2 className="text-xs font-bold text-slate-600 uppercase tracking-wider">Lista de Veículos Cadastrados</h2>
-              <div className="relative">
-                <Search size={14} className="absolute left-2.5 top-2.5 text-slate-400" />
-                <input
-                  type="text"
-                  placeholder="Buscar veículo..."
-                  value={searchVehicleQuery}
-                  onChange={e => setSearchVehicleQuery(e.target.value)}
-                  className="bg-slate-55 text-xs border border-slate-200 pl-8 pr-3 py-1.5 rounded outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 w-full sm:w-48"
-                />
-              </div>
-            </div>
-
-            <div className="flex-1 overflow-auto pr-1">
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="border-b border-slate-100 text-slate-400">
-                    <th className="pb-2 font-bold uppercase text-[10px]">Placa / Tipo</th>
-                    <th className="pb-2 font-bold uppercase text-[10px]">Proprietário</th>
-                    <th className="pb-2 font-bold uppercase text-[10px]">Motorista Padrão</th>
-                    <th className="pb-2 font-bold uppercase text-[10px]">Média Vasilhames</th>
-                    <th className="pb-2 text-right font-bold uppercase text-[10px]">Ações</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-50 font-medium">
-                  {filteredVehicles.map(v => {
-                    const linkedDrv = registeredDrivers.find(d => d.id === v.defaultDriverId);
-                    return (
-                      <tr key={v.id} className="hover:bg-slate-50">
-                        <td className="py-2.5">
-                          {editingVehicleId === v.id ? (
-                            <div className="space-y-1">
-                              <input
-                                type="text"
-                                value={editingVehiclePlate}
-                                onChange={e => setEditingVehiclePlate(e.target.value)}
-                                onKeyDown={e => {
-                                  if (e.key === 'Enter') {
-                                    const nextPlate = editingVehiclePlate.trim().toUpperCase();
-                                    if (nextPlate !== '') {
-                                      const plateExists = registeredVehicles.some(oth => oth.id !== v.id && oth.plate.toUpperCase() === nextPlate.toUpperCase());
-                                      if (plateExists) {
-                                        alert(`O veículo com placa "${nextPlate}" já está cadastrado.`);
-                                        return;
-                                      }
-                                      updateRegisteredVehicle(v.id, {
-                                        plate: nextPlate,
-                                        vehicleType: editingVehicleType
-                                      });
-                                    }
-                                    setEditingVehicleId('');
-                                    setEditingVehiclePlate('');
-                                  } else if (e.key === 'Escape') {
-                                    setEditingVehicleId('');
-                                    setEditingVehiclePlate('');
-                                  }
-                                }}
-                                className="bg-white border border-slate-300 rounded font-mono font-bold text-xs uppercase p-1 w-24 outline-none focus:border-blue-400"
-                              />
-                              <select
-                                value={editingVehicleType}
-                                onChange={e => setEditingVehicleType(e.target.value)}
-                                className="bg-white border border-slate-300 rounded text-[10px] p-1 w-28 block mt-1 outline-none text-slate-700 font-semibold focus:border-blue-400"
-                              >
-                                {customVehicleCategories.map(cat => (
-                                  <option key={cat.id} value={cat.id}>
-                                    {cat.name}
-                                  </option>
-                                ))}
-                              </select>
-                            </div>
-                          ) : (
-                            <>
-                              <div className="font-mono font-bold text-slate-900 tracking-wider uppercase text-xs">
-                                {v.plate}
-                              </div>
-                              <div className="text-[10px] text-slate-500 font-normal">
-                                {getVehicleTypeLabel(v.vehicleType)} {v.model ? `- ${v.model}` : ''}
-                              </div>
-                            </>
-                          )}
-                        </td>
-                        <td className="py-2.5">
-                          <span className={`px-1.5 py-0.5 rounded text-[9px] uppercase font-bold ${
-                            v.ownerType === 'proprio' ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-150 text-slate-700 bg-slate-100'
-                          }`}>
-                            {v.ownerType === 'proprio' ? 'Próprio' : 'Terceiro'}
-                          </span>
-                        </td>
-                        <td className="py-2.5">
-                          <div className="flex items-center gap-1.5">
-                            <select
-                              value={v.defaultDriverId || ''}
-                              onChange={(e) => {
-                                const drvId = e.target.value || undefined;
-                                if (drvId) {
-                                  const alreadyLinked = registeredVehicles.some(oth => oth.id !== v.id && oth.defaultDriverId === drvId);
-                                  if (alreadyLinked) {
-                                    alert('Este motorista já está vinculado a outro veículo.');
-                                    return;
-                                  }
-                                }
-                                updateRegisteredVehicleDriver(v.id, drvId);
-                              }}
-                              className="bg-slate-50 border border-slate-200 rounded text-xs p-1 font-semibold text-slate-700 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 w-full max-w-[130px]"
-                            >
-                              <option value="">Nenhum motorista</option>
-                              {/* Filter drivers so only appropriate aligned type drivers are showing */}
-                              {getAvailableDriversForExistingVehicle(v).map(drv => (
-                                <option key={drv.id} value={drv.id}>
-                                  {drv.name} ({drv.driverType === 'interno' ? 'Frota' : 'Cliente'})
-                                </option>
-                              ))}
-                            </select>
-                            {v.defaultDriverId && (
-                              <button
-                                onClick={() => updateRegisteredVehicleDriver(v.id, undefined)}
-                                className="p-1 hover:text-red-650 hover:text-red-600 text-slate-400 transition cursor-pointer flex-shrink-0"
-                                title="Remover motorista do veículo"
-                              >
-                                <XCircle size={14} />
-                              </button>
-                            )}
-                          </div>
-                        </td>
-                        <td className="py-2.5">
-                          <input
-                            type="number"
-                            min="0"
-                            placeholder="Nenhum"
-                            value={v.averageVasilhames !== undefined ? v.averageVasilhames : ''}
-                            onChange={(e) => {
-                              const inputVal = e.target.value;
-                              const parsed = inputVal === '' ? undefined : parseInt(inputVal, 10);
-                              updateRegisteredVehicle(v.id, {
-                                averageVasilhames: (parsed !== undefined && !isNaN(parsed) && parsed >= 0) ? parsed : undefined
-                              });
-                            }}
-                            className="bg-slate-50 border border-slate-200 rounded text-xs px-1.5 py-1 text-center font-bold text-slate-700 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 w-16"
-                          />
-                        </td>
-                        <td className="py-2.5 text-right">
-                          <div className="flex items-center justify-end gap-1.5 animate-in">
-                            {editingVehicleId === v.id ? (
-                              <>
-                                <button
-                                  onClick={() => {
-                                    const nextPlate = editingVehiclePlate.trim().toUpperCase();
-                                    if (nextPlate !== '') {
-                                      const plateExists = registeredVehicles.some(oth => oth.id !== v.id && oth.plate.toUpperCase() === nextPlate.toUpperCase());
-                                      if (plateExists) {
-                                        alert(`O veículo com placa "${nextPlate}" já está cadastrado.`);
-                                        return;
-                                      }
-                                      updateRegisteredVehicle(v.id, {
-                                        plate: nextPlate,
-                                        vehicleType: editingVehicleType
-                                      });
-                                    }
-                                    setEditingVehicleId('');
-                                    setEditingVehiclePlate('');
-                                  }}
-                                  className="p-1 text-green-600 hover:text-green-800 transition cursor-pointer font-bold"
-                                  title="Salvar Observações"
-                                >
-                                  <Check size={14} />
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    setEditingVehicleId('');
-                                    setEditingVehiclePlate('');
-                                  }}
-                                  className="p-1 text-slate-400 hover:text-slate-600 transition cursor-pointer font-bold"
-                                  title="Cancelar"
-                                >
-                                  <X size={14} />
-                                </button>
-                              </>
-                            ) : (
-                              <>
-                                {!isReadOnly && (
-                                  <button
-                                    onClick={() => {
-                                      setEditingVehicleId(v.id);
-                                      setEditingVehiclePlate(v.plate);
-                                      setEditingVehicleType(v.vehicleType);
-                                    }}
-                                    className="p-1 hover:text-blue-600 text-slate-400 transition cursor-pointer"
-                                    title="Editar Placa / Tipo de Veículo"
-                                  >
-                                    <Edit size={14} />
-                                  </button>
-                                )}
-                                <button
-                                  onClick={() => removeRegisteredVehicle(v.id)}
-                                  disabled={isReadOnly}
-                                  className="p-1 hover:text-red-600 text-slate-400 transition cursor-pointer disabled:opacity-50"
-                                  title="Remover Cadastro"
-                                >
-                                  <Trash2 size={14} />
-                                </button>
-                              </>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                  {filteredVehicles.length === 0 && (
-                    <tr>
-                      <td colSpan={4} className="py-8 text-center text-slate-400 uppercase tracking-wide text-[10px]">
-                        Nenhum veículo cadastrado.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-
-      </div>
-
-      {/* 3. SECTION: PRÉ-CADASTRO DE CLIENTES */}
+      {/* 1. SECTION: PRÉ-CADASTRO DE CLIENTES */}
       <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm mt-6">
         <div className="flex items-center justify-between border-b border-slate-150 pb-3.5 mb-5">
           <div className="flex items-center space-x-2.5">
@@ -2112,7 +1739,7 @@ export const Cadastros: React.FC = () => {
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           {/* Left Column: Register Form & Import/Export */}
-          <div className="lg:col-span-5 space-y-4">
+          <div className="lg:col-span-5 space-y-4 flex flex-col min-h-[1100px] lg:h-[1100px]">
 
             {/* Import / Export Panel */}
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 mb-4 space-y-2.5">
@@ -2161,13 +1788,13 @@ export const Cadastros: React.FC = () => {
               </p>
             </div>
 
-            <form onSubmit={handleCreateClient} className="space-y-3.5 mb-5 p-3.5 bg-slate-50/60 rounded-xl border border-slate-200 focus-within:border-blue-400 transition-colors">
+            <form onSubmit={handleCreateClient} className="space-y-3.5 flex-1 flex flex-col justify-between pr-1 p-3.5 bg-slate-50/60 rounded-xl border border-slate-200 focus-within:border-blue-400 transition-colors">
               <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider border-b border-slate-100 pb-1.5">
                 Novo Cliente
               </h3>
 
-              {/* Código, Nome, Apelido */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              {/* Código, Nome, Apelido, Tipo Pessoa, CPF/CNPJ, RG/IE, DDD, Telefone, Endereço, Número, Bairro, Complemento, Cidade, UF */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
                     Código
@@ -2180,7 +1807,8 @@ export const Cadastros: React.FC = () => {
                     className="w-full bg-white border border-slate-200 rounded text-xs p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm"
                   />
                 </div>
-                <div className="sm:col-span-2">
+
+                <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
                     Nome / Razão Social *
                   </label>
@@ -2193,10 +1821,8 @@ export const Cadastros: React.FC = () => {
                     className="w-full bg-white border border-slate-200 rounded text-xs p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm font-semibold"
                   />
                 </div>
-              </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <div className="sm:col-span-2">
+                <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
                     Apelido / Nome Fantasia
                   </label>
@@ -2208,6 +1834,7 @@ export const Cadastros: React.FC = () => {
                     className="w-full bg-white border border-slate-200 rounded text-xs p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm"
                   />
                 </div>
+
                 <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
                     Tipo de Pessoa
@@ -2237,10 +1864,8 @@ export const Cadastros: React.FC = () => {
                     </button>
                   </div>
                 </div>
-              </div>
 
-              {/* CPF/CNPJ & RG/IE */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {/* CPF/CNPJ & RG/IE */}
                 <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
                     {clientPersonType === 'fisica' ? 'CPF *' : 'CNPJ *'}
@@ -2253,6 +1878,7 @@ export const Cadastros: React.FC = () => {
                     className="w-full bg-white border border-slate-200 rounded text-xs p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm"
                   />
                 </div>
+
                 <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
                     {clientPersonType === 'fisica' ? 'RG' : 'Inscrição Estadual (IE)'}
@@ -2265,12 +1891,10 @@ export const Cadastros: React.FC = () => {
                     className="w-full bg-white border border-slate-200 rounded text-xs p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm"
                   />
                 </div>
-              </div>
 
-              {/* DDD & Telefone */}
-              <div className="grid grid-cols-4 gap-2">
-                <div className="col-span-1">
-                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1 text-center">
+                {/* DDD & Telefone */}
+                <div>
+                  <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
                     DDD
                   </label>
                   <input
@@ -2279,10 +1903,11 @@ export const Cadastros: React.FC = () => {
                     placeholder="11"
                     value={clientDdd}
                     onChange={e => setClientDdd(e.target.value.replace(/\D/g, ''))}
-                    className="w-full bg-white border border-slate-200 rounded text-xs p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm text-center font-semibold"
+                    className="w-full bg-white border border-slate-200 rounded text-xs p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm font-semibold"
                   />
                 </div>
-                <div className="col-span-3">
+
+                <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
                     Telefone
                   </label>
@@ -2294,11 +1919,9 @@ export const Cadastros: React.FC = () => {
                     className="w-full bg-white border border-slate-200 rounded text-xs p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm"
                   />
                 </div>
-              </div>
 
-              {/* Endereço, Número, Bairro */}
-              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-                <div className="sm:col-span-2">
+                {/* Endereço, Número, Bairro */}
+                <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
                     Endereço
                   </label>
@@ -2310,6 +1933,7 @@ export const Cadastros: React.FC = () => {
                     className="w-full bg-white border border-slate-200 rounded text-xs p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm"
                   />
                 </div>
+
                 <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
                     Número
@@ -2322,6 +1946,7 @@ export const Cadastros: React.FC = () => {
                     className="w-full bg-white border border-slate-200 rounded text-xs p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm"
                   />
                 </div>
+
                 <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
                     Bairro
@@ -2334,11 +1959,8 @@ export const Cadastros: React.FC = () => {
                     className="w-full bg-white border border-slate-200 rounded text-xs p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm"
                   />
                 </div>
-              </div>
 
-              {/* Complemento, Cidade, UF */}
-              <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-                <div className="sm:col-span-2">
+                <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
                     Complemento
                   </label>
@@ -2350,6 +1972,7 @@ export const Cadastros: React.FC = () => {
                     className="w-full bg-white border border-slate-200 rounded text-xs p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm"
                   />
                 </div>
+
                 <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
                     Cidade
@@ -2362,6 +1985,7 @@ export const Cadastros: React.FC = () => {
                     className="w-full bg-white border border-slate-200 rounded text-xs p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm"
                   />
                 </div>
+
                 <div>
                   <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">
                     UF (Estado)
@@ -2409,7 +2033,7 @@ export const Cadastros: React.FC = () => {
                   <div className="bg-white border border-slate-200 rounded p-2 max-h-36 overflow-y-auto space-y-1 shadow-sm">
                     {(() => {
                       const list = registeredVehicles.filter(v => 
-                        clientVehicleIds.includes(v.id) || !registeredClients.some(c => (c.vehicleIds || []).includes(v.id) || c.defaultVehicleId === v.id)
+                        clientVehicleIds.includes(v.id) || !linkedVehiclesSet.has(v.id)
                       );
                       if (list.length === 0) {
                         return <span className="text-slate-400 italic text-[10px] block p-1">Nenhum veículo disponível (já vinculados)</span>;
@@ -2451,7 +2075,7 @@ export const Cadastros: React.FC = () => {
                   <div className="bg-white border border-slate-200 rounded p-2 max-h-36 overflow-y-auto space-y-1 shadow-sm">
                     {(() => {
                       const list = registeredDrivers.filter(d => 
-                        clientDriverIds.includes(d.id) || !registeredClients.some(c => (c.driverIds || []).includes(d.id) || c.defaultDriverId === d.id)
+                        clientDriverIds.includes(d.id) || !linkedDriversSet.has(d.id)
                       );
                       if (list.length === 0) {
                         return <span className="text-slate-400 italic text-[10px] block p-1">Nenhum motorista disponível (já vinculados)</span>;
@@ -2512,7 +2136,7 @@ export const Cadastros: React.FC = () => {
           </div>
 
           {/* Right Column: Search & Registered Clients Table */}
-          <div className="lg:col-span-7 space-y-4 flex flex-col bg-slate-50/40 p-4.5 rounded-xl border border-slate-200 shadow-xs">
+          <div className="lg:col-span-7 space-y-4 flex flex-col bg-slate-50/40 p-4.5 rounded-xl border border-slate-200 shadow-xs min-h-[1100px] lg:h-[1100px]">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-1">
               <div className="flex items-center space-x-2.5 bg-white px-3 py-2.5 rounded-xl border border-slate-250 shadow-xs flex-1">
                 <Search size={15} className="text-blue-500 shrink-0" />
@@ -2539,7 +2163,7 @@ export const Cadastros: React.FC = () => {
               <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider">Clientes Cadastrados ({filteredClients.length})</h3>
             </div>
 
-            <div className="overflow-auto max-h-[580px] bg-white rounded-xl border border-slate-150 shadow-inner p-1">
+            <div className="overflow-auto flex-1 bg-white rounded-xl border border-slate-150 shadow-inner p-1">
               <table className="w-full text-left text-xs">
                 <thead>
                   <tr className="border-b border-slate-100 text-slate-200">
@@ -2554,8 +2178,8 @@ export const Cadastros: React.FC = () => {
                     const vIds = cli.vehicleIds || (cli.defaultVehicleId ? [cli.defaultVehicleId] : []);
                     const dIds = cli.driverIds || (cli.defaultDriverId ? [cli.defaultDriverId] : []);
 
-                    const cliVehicles = registeredVehicles.filter(v => vIds.includes(v.id));
-                    const cliDrivers = registeredDrivers.filter(d => dIds.includes(d.id));
+                    const cliVehicles = vIds.map(id => vehiclesById.get(id)).filter(Boolean) as RegisteredVehicle[];
+                    const cliDrivers = dIds.map(id => driversById.get(id)).filter(Boolean) as RegisteredDriver[];
 
                     return (
                       <React.Fragment key={cli.id}>
@@ -3071,6 +2695,984 @@ export const Cadastros: React.FC = () => {
         </div>
 
       </div>
+      {/* 2. SECTION: MOTORISTAS DA EMPRESA */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 mt-6">
+        {/* Left Column: Form Card */}
+        <div className="lg:col-span-5 bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col h-[480px]">
+          <div className="flex items-center space-x-2 border-b border-slate-100 pb-3 mb-4">
+            <UserCheck size={18} className="text-blue-600" />
+            <h2 className="text-sm font-bold text-slate-800 uppercase tracking-tight">Pré-Cadastro de Motoristas</h2>
+          </div>
+
+          <form onSubmit={handleCreateDriver} className="space-y-4 flex-1 flex flex-col justify-between overflow-y-auto pr-1">
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                Nome Completo
+              </label>
+              <input
+                type="text"
+                required
+                value={driverName}
+                onChange={e => setDriverName(e.target.value)}
+                placeholder="Ex: Carlos Eduardo de Souza"
+                className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                Vínculo / Tipo de Motorista
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDriverType('interno')}
+                  className={`p-2 rounded text-xs font-semibold border transition ${
+                    driverType === 'interno'
+                      ? 'border-blue-500 bg-blue-50 text-blue-700'
+                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  Próprio / CLT
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDriverType('cliente')}
+                  className={`p-2 rounded text-xs font-semibold border transition ${
+                    driverType === 'cliente'
+                      ? 'border-blue-500 bg-blue-50 text-blue-700'
+                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  Cliente / Outros
+                </button>
+              </div>
+            </div>
+
+            {driverType === 'interno' && (
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                    Comissão (%)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.1"
+                    required
+                    value={driverCommissionPercent}
+                    onChange={e => setDriverCommissionPercent(parseFloat(e.target.value) || 0)}
+                    className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm font-semibold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                    Limite de Avarias
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    required
+                    value={driverDamageToleranceQty}
+                    onChange={e => setDriverDamageToleranceQty(parseInt(e.target.value) || 0)}
+                    className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm font-semibold"
+                    placeholder="Qtd permitida"
+                  />
+                </div>
+              </div>
+            )}
+
+            {driverError && (
+              <div className="p-2.5 bg-rose-50 text-rose-700 text-xs rounded font-medium flex items-center gap-2">
+                <AlertCircle size={14} />
+                <span>{driverError}</span>
+              </div>
+            )}
+
+            {driverSuccess && (
+              <div className="p-2.5 bg-emerald-50 text-emerald-700 text-xs rounded font-medium">
+                {driverSuccess}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs uppercase tracking-wider p-2.5 rounded shadow transition-colors flex items-center justify-center gap-1.5"
+            >
+              <Plus size={16} />
+              Salvar Motorista
+            </button>
+          </form>
+        </div>
+
+        {/* Right Column: List Card */}
+        <div className="lg:col-span-7 bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col h-[480px]">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4 border-b border-slate-100 pb-3 h-auto">
+            <h2 className="text-xs font-bold text-slate-600 uppercase tracking-wider">Lista de Motoristas Cadastrados</h2>
+            <div className="relative">
+              <Search size={14} className="absolute left-2.5 top-2.5 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Buscar motorista..."
+                value={searchDriverQuery}
+                onChange={e => setSearchDriverQuery(e.target.value)}
+                className="bg-slate-50 text-xs border border-slate-200 pl-8 pr-3 py-1.5 rounded outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 w-full sm:w-48"
+              />
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-auto pr-1">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="border-b border-slate-100 text-slate-400">
+                  <th className="pb-2 font-bold uppercase text-[10px]">Nome</th>
+                  <th className="pb-2 font-bold uppercase text-[10px]">Vínculo</th>
+                  <th className="pb-2 font-bold uppercase text-[10px]">Comissão</th>
+                  <th className="pb-2 font-bold uppercase text-[10px]">Lim. Avarias</th>
+                  <th className="pb-2 text-right font-bold uppercase text-[10px]">Ações</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-50 font-medium">
+                {filteredDrivers.map(d => (
+                  <tr key={d.id} className="hover:bg-slate-50">
+                    <td className="py-2.5 text-slate-900 font-semibold">
+                      {editingDriverId === d.id ? (
+                        <input
+                          type="text"
+                          value={editingDriverName}
+                          onChange={(e) => setEditingDriverName(e.target.value)}
+                          className="bg-white border border-slate-300 rounded text-xs px-2 py-1 font-semibold text-slate-700 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 w-full"
+                          autoFocus
+                        />
+                      ) : (
+                        d.name
+                      )}
+                    </td>
+                    <td className="py-2.5">
+                      <span className={`px-1.5 py-0.5 rounded text-[9px] uppercase font-bold ${
+                        d.driverType === 'interno' ? 'bg-cyan-100 text-cyan-700' : 'bg-emerald-100 text-emerald-700'
+                      }`}>
+                        {d.driverType === 'interno' ? 'Interno' : 'Cliente'}
+                      </span>
+                    </td>
+                    <td className="py-2.5 font-bold text-slate-700">
+                      {editingDriverId === d.id ? (
+                        d.driverType === 'interno' ? (
+                          <input
+                            type="number"
+                            min="0"
+                            max="100"
+                            step="0.1"
+                            value={editingDriverCommissionPercent}
+                            onChange={(e) => setEditingDriverCommissionPercent(parseFloat(e.target.value) || 0)}
+                            className="bg-white border border-slate-300 rounded text-xs px-2 py-1 font-bold text-slate-700 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 w-16"
+                          />
+                        ) : (
+                          <span className="text-slate-400 italic text-[10px] font-normal">-</span>
+                        )
+                      ) : (
+                        d.driverType === 'interno' ? `${d.commissionPercent ?? 8}%` : '-'
+                      )}
+                    </td>
+                    <td className="py-2.5 font-bold text-slate-700">
+                      {editingDriverId === d.id ? (
+                        d.driverType === 'interno' ? (
+                          <input
+                            type="number"
+                            min="0"
+                            value={editingDriverDamageToleranceQty}
+                            onChange={(e) => setEditingDriverDamageToleranceQty(parseInt(e.target.value) || 0)}
+                            className="bg-white border border-slate-300 rounded text-xs px-2 py-1 font-bold text-slate-700 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 w-16"
+                          />
+                        ) : (
+                          <span className="text-slate-400 italic text-[10px] font-normal">-</span>
+                        )
+                      ) : (
+                        d.driverType === 'interno' ? `${d.damageToleranceQty ?? 0} un` : '-'
+                      )}
+                    </td>
+                    <td className="py-2.5 text-right">
+                      <div className="flex items-center justify-end gap-1.5">
+                        {editingDriverId === d.id ? (
+                          <>
+                            <button
+                              onClick={() => {
+                                const nextVal = editingDriverName.trim();
+                                if (nextVal !== '') {
+                                  updateRegisteredDriver(d.id, { 
+                                    name: nextVal,
+                                    commissionPercent: d.driverType === 'interno' ? editingDriverCommissionPercent : undefined,
+                                    damageToleranceQty: d.driverType === 'interno' ? editingDriverDamageToleranceQty : undefined
+                                  });
+                                }
+                                setEditingDriverId('');
+                                setEditingDriverName('');
+                              }}
+                              className="p-1 text-green-600 hover:text-green-800 transition cursor-pointer"
+                              title="Salvar"
+                            >
+                              <Check size={14} />
+                            </button>
+                            <button
+                              onClick={() => {
+                                setEditingDriverId('');
+                                setEditingDriverName('');
+                              }}
+                              className="p-1 text-slate-400 hover:text-slate-600 transition cursor-pointer"
+                              title="Cancelar"
+                            >
+                              <X size={14} />
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            {!isReadOnly && (
+                              <button
+                                onClick={() => {
+                                  setEditingDriverId(d.id);
+                                  setEditingDriverName(d.name);
+                                  setEditingDriverCommissionPercent(d.commissionPercent ?? 8);
+                                  setEditingDriverDamageToleranceQty(d.damageToleranceQty ?? 0);
+                                }}
+                                className="p-1 hover:text-blue-600 text-slate-400 transition cursor-pointer"
+                                title="Editar Nome/Comissão/Avarias do Motorista"
+                              >
+                                <Edit size={14} />
+                              </button>
+                            )}
+                            <button
+                              onClick={() => removeRegisteredDriver(d.id)}
+                              disabled={isReadOnly}
+                              className="p-1 hover:text-red-600 text-slate-400 transition cursor-pointer disabled:opacity-50"
+                              title="Remover Cadastro"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {filteredDrivers.length === 0 && (
+                  <tr>
+                    <td colSpan={5} className="py-8 text-center text-slate-400 uppercase tracking-wide text-[10px]">
+                      Nenhum motorista cadastrado.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      {/* 3. SECTION: SUPERVISORES DE VENDAS */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 mt-6">
+        {/* Left Column: Form Card */}
+        <div className="lg:col-span-5 bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col h-[480px]">
+          <div className="flex items-center space-x-2 border-b border-slate-100 pb-3 mb-4">
+            <Users size={18} className="text-amber-600" />
+            <h2 className="text-sm font-bold text-slate-800 uppercase tracking-tight">Pré-Cadastro de Supervisores de Vendas</h2>
+          </div>
+
+          <form onSubmit={handleCreateSupervisor} className="space-y-4 flex-1 flex flex-col justify-between overflow-y-auto pr-1">
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                Nome do Supervisor
+              </label>
+              <input
+                type="text"
+                required
+                value={supervisorName}
+                onChange={e => setSupervisorName(e.target.value)}
+                placeholder="Ex: Roberto Almeida (Supervisor Geral)"
+                className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400 shadow-sm"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                Telefone / WhatsApp
+              </label>
+              <input
+                type="text"
+                value={supervisorPhone}
+                onChange={e => setSupervisorPhone(e.target.value)}
+                placeholder="(11) 99999-8888"
+                className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400 shadow-sm"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                Status
+              </label>
+              <select
+                value={supervisorActive ? 'ativo' : 'inativo'}
+                onChange={e => setSupervisorActive(e.target.value === 'ativo')}
+                className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400 shadow-sm font-bold"
+              >
+                <option value="ativo">Ativo</option>
+                <option value="inativo">Inativo</option>
+              </select>
+            </div>
+
+            {supervisorError && (
+              <div className="p-2.5 bg-rose-50 text-rose-700 text-xs rounded font-medium flex items-center gap-2">
+                <AlertCircle size={14} />
+                <span>{supervisorError}</span>
+              </div>
+            )}
+
+            {supervisorSuccess && (
+              <div className="p-2.5 bg-emerald-50 text-emerald-700 text-xs rounded font-medium">
+                {supervisorSuccess}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={isReadOnly}
+              className="w-full bg-amber-500 hover:bg-amber-600 text-slate-950 font-black text-xs uppercase tracking-wider p-2.5 rounded shadow transition-colors flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              <Plus size={16} />
+              Salvar Supervisor
+            </button>
+          </form>
+        </div>
+
+        {/* Right Column: List Card */}
+        <div className="lg:col-span-7 bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col h-[480px]">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4 border-b border-slate-100 pb-3">
+            <h2 className="text-xs font-bold text-slate-600 uppercase tracking-wider">Supervisores Cadastrados</h2>
+            <div className="relative">
+              <Search size={14} className="absolute left-2.5 top-2.5 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Buscar supervisor..."
+                value={searchSupervisorQuery}
+                onChange={e => setSearchSupervisorQuery(e.target.value)}
+                className="bg-slate-50 text-xs border border-slate-200 pl-8 pr-3 py-1.5 rounded outline-none focus:border-amber-400 focus:ring-1 focus:ring-amber-400 w-full sm:w-48"
+              />
+            </div>
+          </div>
+
+          <div className="overflow-y-auto flex-1 pr-1 custom-scrollbar">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="border-b border-slate-100 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                  <th className="py-2 px-1">Nome</th>
+                  <th className="py-2 px-1">Telefone</th>
+                  <th className="py-2 px-1">Status</th>
+                  <th className="py-2 px-1 text-right">Ações</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 text-xs font-medium text-slate-700">
+                {(registeredSupervisors || [])
+                  .filter(s => !searchSupervisorQuery || s.name.toLowerCase().includes(searchSupervisorQuery.toLowerCase()))
+                  .map(sup => (
+                    <tr key={sup.id} className="hover:bg-slate-50">
+                      <td className="py-2.5 px-1 font-bold text-slate-800">
+                        {editingSupervisorId === sup.id ? (
+                          <input
+                            type="text"
+                            value={editingSupervisorName}
+                            onChange={e => setEditingSupervisorName(e.target.value)}
+                            className="bg-white border border-amber-300 rounded px-2 py-1 text-xs w-full focus:outline-none"
+                          />
+                        ) : (
+                          sup.name
+                        )}
+                      </td>
+                      <td className="py-2.5 px-1 text-slate-500 font-mono text-[11px]">
+                        {editingSupervisorId === sup.id ? (
+                          <input
+                            type="text"
+                            value={editingSupervisorPhone}
+                            onChange={e => setEditingSupervisorPhone(e.target.value)}
+                            className="bg-white border border-amber-300 rounded px-2 py-1 text-xs w-full focus:outline-none"
+                          />
+                        ) : (
+                          sup.phone || '-'
+                        )}
+                      </td>
+                      <td className="py-2.5 px-1">
+                        {editingSupervisorId === sup.id ? (
+                          <select
+                            value={editingSupervisorActive ? 'ativo' : 'inativo'}
+                            onChange={e => setEditingSupervisorActive(e.target.value === 'ativo')}
+                            className="bg-white border border-amber-300 rounded px-1.5 py-1 text-xs"
+                          >
+                            <option value="ativo">Ativo</option>
+                            <option value="inativo">Inativo</option>
+                          </select>
+                        ) : (
+                          <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                            sup.active ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-600'
+                          }`}>
+                            {sup.active ? 'Ativo' : 'Inativo'}
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-1 text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          {editingSupervisorId === sup.id ? (
+                            <>
+                              <button
+                                onClick={() => {
+                                  if (editingSupervisorName.trim()) {
+                                    updateRegisteredSupervisor(sup.id, {
+                                      name: editingSupervisorName.trim(),
+                                      phone: editingSupervisorPhone.trim() || undefined,
+                                      active: editingSupervisorActive
+                                    });
+                                  }
+                                  setEditingSupervisorId('');
+                                }}
+                                className="p-1 text-emerald-600 hover:text-emerald-700 transition cursor-pointer"
+                                title="Salvar"
+                              >
+                                <Check size={14} />
+                              </button>
+                              <button
+                                onClick={() => setEditingSupervisorId('')}
+                                className="p-1 text-slate-400 hover:text-slate-600 transition cursor-pointer"
+                                title="Cancelar"
+                              >
+                                <X size={14} />
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              {!isReadOnly && (
+                                <button
+                                  onClick={() => {
+                                    setEditingSupervisorId(sup.id);
+                                    setEditingSupervisorName(sup.name);
+                                    setEditingSupervisorPhone(sup.phone || '');
+                                    setEditingSupervisorActive(sup.active ?? true);
+                                  }}
+                                  className="p-1 hover:text-amber-600 text-slate-400 transition cursor-pointer"
+                                  title="Editar Supervisor"
+                                >
+                                  <Edit size={14} />
+                                </button>
+                              )}
+                              <button
+                                onClick={() => removeRegisteredSupervisor(sup.id)}
+                                disabled={isReadOnly}
+                                className="p-1 hover:text-red-600 text-slate-400 transition cursor-pointer disabled:opacity-50"
+                                title="Remover Cadastro"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                {(registeredSupervisors || []).length === 0 && (
+                  <tr>
+                    <td colSpan={4} className="py-8 text-center text-slate-400 uppercase tracking-wide text-[10px]">
+                      Nenhum supervisor cadastrado.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      {/* 4. SECTION: PRÉ-CADASTRO DE VEÍCULOS */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 mt-6">
+        {/* Left Column: Form Card */}
+        <div className="lg:col-span-5 bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col min-h-[920px] lg:h-[920px]">
+          <div className="flex items-center space-x-2 border-b border-slate-100 pb-3 mb-4">
+            <Truck size={18} className="text-blue-600" />
+            <h2 className="text-sm font-bold text-slate-800 uppercase tracking-tight">Pré-Cadastro de Veículos</h2>
+          </div>
+
+          <form onSubmit={handleCreateVehicle} className="space-y-4 flex-1 flex flex-col justify-between overflow-y-auto pr-1">
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                Placa do Veículo
+              </label>
+              <input
+                type="text"
+                required
+                value={vehiclePlate}
+                onChange={e => setVehiclePlate(e.target.value)}
+                placeholder="Ex: ABC-1234, ABC1D23"
+                className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm uppercase font-mono tracking-widest font-semibold"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                Proprietário
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setVehicleOwnerType('proprio')}
+                  className={`p-2 rounded text-xs font-semibold border transition ${
+                    vehicleOwnerType === 'proprio'
+                      ? 'border-blue-500 bg-blue-50 text-blue-700'
+                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  Frota Própria
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setVehicleOwnerType('terceiro')}
+                  className={`p-2 rounded text-xs font-semibold border transition ${
+                    vehicleOwnerType === 'terceiro'
+                      ? 'border-blue-500 bg-blue-50 text-blue-700'
+                      : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  Terceiro / Cliente
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                Tipo do Veículo
+              </label>
+              <select
+                value={vehicleType}
+                onChange={e => setVehicleType(e.target.value)}
+                className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm"
+              >
+                {customVehicleCategories.map(cat => (
+                  <option key={cat.id} value={cat.id}>
+                    {cat.name} {cat.bypassProductionDefault ? '(Ignora Fila)' : '(Vai p/ Fila)'}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                Modelo ou Descrição (Opcional)
+              </label>
+              <input
+                type="text"
+                value={vehicleModel}
+                onChange={e => setVehicleModel(e.target.value)}
+                placeholder="Ex: Scania R450 Vermelha"
+                className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                Motorista Pré-Vinculado (Preenchimento Automático)
+              </label>
+              <select
+                value={defaultDriverId}
+                onChange={e => setDefaultDriverId(e.target.value)}
+                className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm"
+              >
+                <option value="">Nenhum motorista pré-vinculado</option>
+                {availableDriversForNewVehicle.map(d => (
+                  <option key={d.id} value={d.id}>
+                    {d.name} ({d.driverType === 'interno' ? 'Frota' : 'Cliente'})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                Média de Vasilhames / Carga (Cálculo Fila)
+              </label>
+              <input
+                type="number"
+                min="0"
+                placeholder="Ex: 50"
+                value={vehicleAverageVasilhames}
+                onChange={e => setVehicleAverageVasilhames(e.target.value)}
+                className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm font-semibold text-slate-700"
+              />
+              <p className="text-[10px] text-slate-400 mt-1">
+                Estimativa padrão para o cálculo de tempo de descarregamento na fila.
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                Desvio de Fila Padrão
+              </label>
+              <div className="flex items-center h-10 bg-slate-50 border border-slate-200 rounded px-3.5 shadow-sm">
+                <input
+                  type="checkbox"
+                  id="vehicle-bypass"
+                  checked={vehicleBypassProductionDefault}
+                  onChange={e => setVehicleBypassProductionDefault(e.target.checked)}
+                  className="w-4 h-4 text-blue-600 border-slate-300 rounded focus:ring-blue-500 cursor-pointer"
+                />
+                <label htmlFor="vehicle-bypass" className="ml-2.5 text-xs font-bold text-slate-700 select-none uppercase tracking-wide cursor-pointer">
+                  Ignorar Fila de Produção por Padrão
+                </label>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1.5">
+                Finalidade Padrão de Entrada
+              </label>
+              <select
+                value={vehicleDefaultPurposeId}
+                onChange={e => setVehicleDefaultPurposeId(e.target.value)}
+                className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm font-semibold text-slate-700"
+              >
+                <option value="">Nenhuma (Usar padrão da categoria/sistema)</option>
+                {customEntryPurposes.map(purp => (
+                  <option key={purp.id} value={purp.id}>
+                    {purp.name} {purp.bypassProductionDefault ? '(Desvia da Fila)' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {vehicleOwnerType === 'proprio' && (
+              <div className="bg-amber-50/50 border border-amber-200/80 rounded-lg p-3.5 space-y-3 mt-4">
+                <h4 className="text-[11px] font-extrabold text-amber-800 uppercase tracking-widest flex items-center gap-1.5">
+                  🚚 Viagem Inicial / Carga Inicial em Trânsito (Opcional)
+                </h4>
+                <p className="text-[10px] text-amber-700/95 leading-relaxed font-medium">
+                  Se este veículo de frota própria já estiver na rua realizando uma entrega antes de usar o sistema pela primeira vez, informe a quantidade da viagem inicial abaixo.
+                </p>
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-[10px] font-bold text-amber-800 uppercase tracking-wider mb-1">
+                      Carga Inicial (Qtd de Vasilhames)
+                    </label>
+                    <input
+                      type="number"
+                      min="1"
+                      placeholder="Ex: 500"
+                      value={vehicleInitialTripQty}
+                      onChange={e => setVehicleInitialTripQty(e.target.value)}
+                      className="w-full bg-white border border-amber-300 rounded text-xs p-2 outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 shadow-sm font-bold text-amber-950"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-amber-800 uppercase tracking-wider mb-1">
+                      Motorista Responsável
+                    </label>
+                    <select
+                      value={vehicleInitialTripDriverId}
+                      onChange={e => setVehicleInitialTripDriverId(e.target.value)}
+                      className="w-full bg-white border border-amber-300 rounded text-xs p-2 outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 shadow-sm font-semibold text-amber-950"
+                    >
+                      <option value="">-- Selecione o Motorista --</option>
+                      {registeredDrivers
+                        .filter(d => d.driverType === 'interno')
+                        .sort((a, b) => a.name.localeCompare(b.name))
+                        .map(d => (
+                          <option key={d.id} value={d.id}>
+                            {d.name}
+                          </option>
+                        ))
+                      }
+                    </select>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {vehicleError && (
+              <div className="p-2.5 bg-rose-50 text-rose-700 text-xs rounded font-medium flex items-center gap-2">
+                <AlertCircle size={14} />
+                <span>{vehicleError}</span>
+              </div>
+            )}
+
+            {vehicleSuccess && (
+              <div className="p-2.5 bg-emerald-50 text-emerald-700 text-xs rounded font-medium">
+                {vehicleSuccess}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs uppercase tracking-wider p-2.5 rounded shadow transition-colors flex items-center justify-center gap-1.5"
+            >
+              <Plus size={16} />
+              Salvar Veículo
+            </button>
+          </form>
+        </div>
+
+        {/* Right Column: List Card */}
+        <div className="lg:col-span-7 bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col min-h-[920px] lg:h-[920px]">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-4 border-b border-slate-100 pb-3 h-auto">
+              <h2 className="text-xs font-bold text-slate-600 uppercase tracking-wider">Lista de Veículos Cadastrados</h2>
+              <div className="relative">
+                <Search size={14} className="absolute left-2.5 top-2.5 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Buscar veículo..."
+                  value={searchVehicleQuery}
+                  onChange={e => setSearchVehicleQuery(e.target.value)}
+                  className="bg-slate-55 text-xs border border-slate-200 pl-8 pr-3 py-1.5 rounded outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 w-full sm:w-48"
+                />
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-auto pr-1">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-slate-100 text-slate-400">
+                    <th className="pb-2 font-bold uppercase text-[10px]">Placa / Tipo</th>
+                    <th className="pb-2 font-bold uppercase text-[10px]">Proprietário</th>
+                    <th className="pb-2 font-bold uppercase text-[10px]">Motorista Padrão</th>
+                    <th className="pb-2 font-bold uppercase text-[10px]">Média Vasilhames</th>
+                    <th className="pb-2 font-bold uppercase text-[10px]">Desvio Fila</th>
+                    <th className="pb-2 font-bold uppercase text-[10px]">Finalidade Padrão</th>
+                    <th className="pb-2 text-right font-bold uppercase text-[10px]">Ações</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-50 font-medium">
+                  {filteredVehicles.map(v => {
+                    const linkedDrv = registeredDrivers.find(d => d.id === v.defaultDriverId);
+                    return (
+                      <tr key={v.id} className="hover:bg-slate-50">
+                        <td className="py-2.5">
+                          {editingVehicleId === v.id ? (
+                            <div className="space-y-1">
+                              <input
+                                type="text"
+                                value={editingVehiclePlate}
+                                onChange={e => setEditingVehiclePlate(e.target.value)}
+                                onKeyDown={e => {
+                                  if (e.key === 'Enter') {
+                                    const nextPlate = editingVehiclePlate.trim().toUpperCase();
+                                    if (nextPlate !== '') {
+                                      const plateExists = registeredVehicles.some(oth => oth.id !== v.id && oth.plate.toUpperCase() === nextPlate.toUpperCase());
+                                      if (plateExists) {
+                                        alert(`O veículo com placa "${nextPlate}" já está cadastrado.`);
+                                        return;
+                                      }
+                                      updateRegisteredVehicle(v.id, {
+                                        plate: nextPlate,
+                                        vehicleType: editingVehicleType
+                                      });
+                                    }
+                                    setEditingVehicleId('');
+                                    setEditingVehiclePlate('');
+                                  } else if (e.key === 'Escape') {
+                                    setEditingVehicleId('');
+                                    setEditingVehiclePlate('');
+                                  }
+                                }}
+                                className="bg-white border border-slate-300 rounded font-mono font-bold text-xs uppercase p-1 w-24 outline-none focus:border-blue-400"
+                              />
+                              <select
+                                value={editingVehicleType}
+                                onChange={e => setEditingVehicleType(e.target.value)}
+                                className="bg-white border border-slate-300 rounded text-[10px] p-1 w-28 block mt-1 outline-none text-slate-700 font-semibold focus:border-blue-400"
+                              >
+                                {customVehicleCategories.map(cat => (
+                                  <option key={cat.id} value={cat.id}>
+                                    {cat.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          ) : (
+                            <>
+                              <div className="font-mono font-bold text-slate-900 tracking-wider uppercase text-xs">
+                                {v.plate}
+                              </div>
+                              <div className="text-[10px] text-slate-500 font-normal">
+                                {getVehicleTypeLabel(v.vehicleType)} {v.model ? `- ${v.model}` : ''}
+                              </div>
+                            </>
+                          )}
+                        </td>
+                        <td className="py-2.5">
+                          <span className={`px-1.5 py-0.5 rounded text-[9px] uppercase font-bold ${
+                            v.ownerType === 'proprio' ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-150 text-slate-700 bg-slate-100'
+                          }`}>
+                            {v.ownerType === 'proprio' ? 'Próprio' : 'Terceiro'}
+                          </span>
+                        </td>
+                        <td className="py-2.5">
+                          <div className="flex items-center gap-1.5">
+                            <select
+                              value={v.defaultDriverId || ''}
+                              onChange={(e) => {
+                                const drvId = e.target.value || undefined;
+                                if (drvId) {
+                                  const alreadyLinked = registeredVehicles.some(oth => oth.id !== v.id && oth.defaultDriverId === drvId);
+                                  if (alreadyLinked) {
+                                    alert('Este motorista já está vinculado a outro veículo.');
+                                    return;
+                                  }
+                                }
+                                updateRegisteredVehicleDriver(v.id, drvId);
+                              }}
+                              className="bg-slate-50 border border-slate-200 rounded text-xs p-1 font-semibold text-slate-700 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 w-full max-w-[130px]"
+                            >
+                              <option value="">Nenhum motorista</option>
+                              {/* Filter drivers so only appropriate aligned type drivers are showing */}
+                              {getAvailableDriversForExistingVehicle(v).map(drv => (
+                                <option key={drv.id} value={drv.id}>
+                                  {drv.name} ({drv.driverType === 'interno' ? 'Frota' : 'Cliente'})
+                                </option>
+                              ))}
+                            </select>
+                            {v.defaultDriverId && (
+                              <button
+                                onClick={() => updateRegisteredVehicleDriver(v.id, undefined)}
+                                className="p-1 hover:text-red-650 hover:text-red-600 text-slate-400 transition cursor-pointer flex-shrink-0"
+                                title="Remover motorista do veículo"
+                              >
+                                <XCircle size={14} />
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                        <td className="py-2.5">
+                          <input
+                            type="number"
+                            min="0"
+                            placeholder="Nenhum"
+                            value={v.averageVasilhames !== undefined ? v.averageVasilhames : ''}
+                            onChange={(e) => {
+                              const inputVal = e.target.value;
+                              const parsed = inputVal === '' ? undefined : parseInt(inputVal, 10);
+                              updateRegisteredVehicle(v.id, {
+                                averageVasilhames: (parsed !== undefined && !isNaN(parsed) && parsed >= 0) ? parsed : undefined
+                              });
+                            }}
+                            className="bg-slate-50 border border-slate-200 rounded text-xs px-1.5 py-1 text-center font-bold text-slate-700 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 w-16"
+                          />
+                        </td>
+                        <td className="py-2.5 pl-4">
+                          <input
+                            type="checkbox"
+                            checked={v.bypassProductionDefault || false}
+                            onChange={(e) => {
+                              if (isReadOnly) return;
+                              updateRegisteredVehicle(v.id, {
+                                bypassProductionDefault: e.target.checked
+                              });
+                            }}
+                            disabled={isReadOnly}
+                            className="w-4 h-4 text-blue-600 border-slate-300 rounded focus:ring-blue-500 cursor-pointer disabled:opacity-50"
+                            title="Desviar da fila de produção por padrão"
+                          />
+                        </td>
+                        <td className="py-2.5">
+                          <select
+                            value={v.defaultPurposeId || ''}
+                            onChange={(e) => {
+                              if (isReadOnly) return;
+                              updateRegisteredVehicle(v.id, {
+                                defaultPurposeId: e.target.value || undefined
+                              });
+                            }}
+                            disabled={isReadOnly}
+                            className="bg-slate-50 border border-slate-200 rounded text-xs p-1 font-semibold text-slate-700 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 w-full max-w-[150px] disabled:opacity-50"
+                          >
+                            <option value="">Nenhuma (Padrão)</option>
+                            {customEntryPurposes.map(purp => (
+                              <option key={purp.id} value={purp.id}>
+                                {purp.name}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td className="py-2.5 text-right">
+                          <div className="flex items-center justify-end gap-1.5 animate-in">
+                            {editingVehicleId === v.id ? (
+                              <>
+                                <button
+                                  onClick={() => {
+                                    const nextPlate = editingVehiclePlate.trim().toUpperCase();
+                                    if (nextPlate !== '') {
+                                      const plateExists = registeredVehicles.some(oth => oth.id !== v.id && oth.plate.toUpperCase() === nextPlate.toUpperCase());
+                                      if (plateExists) {
+                                        alert(`O veículo com placa "${nextPlate}" já está cadastrado.`);
+                                        return;
+                                      }
+                                      updateRegisteredVehicle(v.id, {
+                                        plate: nextPlate,
+                                        vehicleType: editingVehicleType
+                                      });
+                                    }
+                                    setEditingVehicleId('');
+                                    setEditingVehiclePlate('');
+                                  }}
+                                  className="p-1 text-green-600 hover:text-green-800 transition cursor-pointer font-bold"
+                                  title="Salvar Observações"
+                                >
+                                  <Check size={14} />
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setEditingVehicleId('');
+                                    setEditingVehiclePlate('');
+                                  }}
+                                  className="p-1 text-slate-400 hover:text-slate-600 transition cursor-pointer font-bold"
+                                  title="Cancelar"
+                                >
+                                  <X size={14} />
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                {!isReadOnly && (
+                                  <button
+                                    onClick={() => {
+                                      setEditingVehicleId(v.id);
+                                      setEditingVehiclePlate(v.plate);
+                                      setEditingVehicleType(v.vehicleType);
+                                    }}
+                                    className="p-1 hover:text-blue-600 text-slate-400 transition cursor-pointer"
+                                    title="Editar Placa / Tipo de Veículo"
+                                  >
+                                    <Edit size={14} />
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => removeRegisteredVehicle(v.id)}
+                                  disabled={isReadOnly}
+                                  className="p-1 hover:text-red-600 text-slate-400 transition cursor-pointer disabled:opacity-50"
+                                  title="Remover Cadastro"
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {filteredVehicles.length === 0 && (
+                    <tr>
+                      <td colSpan={4} className="py-8 text-center text-slate-400 uppercase tracking-wide text-[10px]">
+                        Nenhum veículo cadastrado.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
     </div>
   );
 };

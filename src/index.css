@@ -1,9 +1,20 @@
 @import "tailwindcss";
 
-html, body, #root {
+html, body, #root, main, #root > div {
   height: 100%;
   margin: 0;
   overflow: hidden;
+  overscroll-behavior-x: none !important;
+}
+
+/* Prevent horizontal swipe history navigation on scrollable containers and enable smooth momentum scrolling */
+.overflow-x-auto,
+.overflow-x-scroll,
+.overflow-auto,
+[class*="overflow-x-"],
+table {
+  overscroll-behavior-x: none !important;
+  -webkit-overflow-scrolling: touch !important; /* Momentum scrolling on iOS devices */
 }
 
 @media print {

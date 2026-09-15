@@ -1,10 +1,13 @@
-import { initializeApp, setLogLevel } from 'firebase/app';
-import { initializeFirestore, doc, getDoc } from 'firebase/firestore';
+import { initializeApp, setLogLevel as setAppLogLevel } from 'firebase/app';
+import { initializeFirestore, doc, getDoc, setLogLevel as setFirestoreLogLevel } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
 
-// Silence noisy internal Firebase console warnings when connection is unavailable or blocked in sandboxed iframes.
+// Silence noisy internal Firebase console warnings when connection is unavailable or stream recycles.
 // The app has a high-reliability fallback mechanism that polls the API state every 5 seconds.
-setLogLevel('silent');
+try {
+  setAppLogLevel('silent');
+  setFirestoreLogLevel('silent');
+} catch (e) {}
 
 const app = initializeApp(firebaseConfig);
 
@@ -22,7 +25,11 @@ export async function testConnection() {
     const docRef = doc(db, 'appState', 'current');
     await getDoc(docRef);
     console.log("Firebase Firestore connected successfully on client.");
-  } catch (error) {
-    console.error("Test connection to Firestore failed:", error);
+  } catch (error: any) {
+    if (error?.message?.includes('Quota exceeded') || error?.code === 'resource-exhausted') {
+      console.warn("Firestore daily quota limit reached. Using local REST API server fallback.");
+    } else {
+      console.error("Test connection to Firestore failed:", error);
+    }
   }
 }

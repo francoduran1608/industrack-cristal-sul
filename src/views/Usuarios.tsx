@@ -12,7 +12,9 @@ export const Usuarios: React.FC = () => {
     updateSystemUser,
     currentUser,
     registeredDrivers = [],
-    addRegisteredDriver
+    addRegisteredDriver,
+    registeredSupervisors = [],
+    addRegisteredSupervisor
   } = useStore();
 
   const [name, setName] = useState('');
@@ -29,7 +31,8 @@ export const Usuarios: React.FC = () => {
     cadastros: true,
     config: false,
     prestacao_contas: false,
-    estoque: false
+    estoque: false,
+    linha_descartavel: false
   });
 
   const [errorMsg, setErrorMsg] = useState('');
@@ -63,7 +66,7 @@ export const Usuarios: React.FC = () => {
       password: password.trim() || '123456',
       role: role,
       unit: unit,
-      modules: role === 'admin' ? {
+      modules: (role === 'admin' || role === 'supervisor') ? {
         portaria: true,
         fila: true,
         abastecimento: true,
@@ -72,7 +75,8 @@ export const Usuarios: React.FC = () => {
         cadastros: true,
         config: true,
         prestacao_contas: true,
-        estoque: true
+        estoque: true,
+        linha_descartavel: true
       } : { ...modules }
     };
 
@@ -94,6 +98,20 @@ export const Usuarios: React.FC = () => {
       }
     }
 
+    // Auto-register sales supervisor if role is 'supervisor'
+    if (newUser.role === 'supervisor') {
+      const existsInSupervisors = (registeredSupervisors || []).some(
+        s => s.name.toLowerCase() === newUser.name.toLowerCase()
+      );
+      if (!existsInSupervisors) {
+        addRegisteredSupervisor({
+          id: 'sup-' + Date.now().toString(36),
+          name: newUser.name,
+          active: true
+        });
+      }
+    }
+
     setName('');
     setUsername('');
     setPassword('');
@@ -108,7 +126,8 @@ export const Usuarios: React.FC = () => {
       cadastros: true,
       config: false,
       prestacao_contas: false,
-      estoque: false
+      estoque: false,
+      linha_descartavel: false
     });
     setSuccessMsg('Usuário cadastrado com sucesso!');
     setTimeout(() => setSuccessMsg(''), 3000);
@@ -212,10 +231,28 @@ export const Usuarios: React.FC = () => {
               <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1.5">Perfil de Acesso</label>
               <select
                 value={role}
-                onChange={(e) => setRole(e.target.value as any)}
+                onChange={(e) => {
+                  const newRole = e.target.value as any;
+                  setRole(newRole);
+                  if (newRole === 'supervisor' || newRole === 'admin') {
+                    setModules({
+                      portaria: true,
+                      fila: true,
+                      abastecimento: true,
+                      relatorios: true,
+                      chat: true,
+                      cadastros: true,
+                      config: true,
+                      prestacao_contas: true,
+                      estoque: true,
+                      linha_descartavel: true
+                    });
+                  }
+                }}
                 className="w-full px-3 py-2 rounded-lg border border-slate-200 text-xs focus:ring-1 focus:ring-blue-500 outline-none bg-white font-medium"
               >
                 <option value="operador">Operador (Restrito/Personalizado)</option>
+                <option value="supervisor">Supervisor de Vendas (Visualizador + Lançamento de Pré-Venda)</option>
                 <option value="visualizador">Apenas Visualização (Acesso Leitura)</option>
                 <option value="motorista">Motorista (Acesso App Viagem)</option>
                 <option value="admin">Administrador (Acesso Total)</option>
@@ -234,7 +271,7 @@ export const Usuarios: React.FC = () => {
               </select>
             </div>
 
-            {(role === 'operador' || role === 'visualizador') && (
+            {(role === 'operador' || role === 'visualizador' || role === 'supervisor') && (
               <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 space-y-2.5">
                 <span className="block text-[9px] font-black text-slate-500 uppercase tracking-wider mb-1">Módulos Permitidos</span>
                 
@@ -309,6 +346,16 @@ export const Usuarios: React.FC = () => {
                 </label>
 
                 <label className="flex items-center justify-between text-xs font-semibold text-slate-700 cursor-pointer">
+                  <span>Linha Descartável</span>
+                  <input
+                    type="checkbox"
+                    checked={modules.linha_descartavel}
+                    onChange={(e) => setModules({ ...modules, linha_descartavel: e.target.checked })}
+                    className="rounded border-slate-300 text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between text-xs font-semibold text-slate-700 cursor-pointer">
                   <span>Configurações do Sistema</span>
                   <input
                     type="checkbox"
@@ -368,6 +415,10 @@ export const Usuarios: React.FC = () => {
                         <span className="bg-indigo-100 text-indigo-800 text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">
                           Administrador
                         </span>
+                      ) : user.role === 'supervisor' ? (
+                        <span className="bg-purple-100 text-purple-800 text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider border border-purple-200">
+                          Supervisor
+                        </span>
                       ) : user.role === 'visualizador' ? (
                         <span className="bg-amber-100 text-amber-800 text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider border border-amber-200">
                           Visualizador
@@ -414,6 +465,7 @@ export const Usuarios: React.FC = () => {
                               { label: 'Cadastros', key: 'cadastros' as const },
                               { label: 'Acerto', key: 'prestacao_contas' as const },
                               { label: 'Estoque', key: 'estoque' as const },
+                              { label: 'Descartável', key: 'linha_descartavel' as const },
                               { label: 'Config', key: 'config' as const },
                             ].map((m) => {
                               const isPerm = user.modules[m.key];

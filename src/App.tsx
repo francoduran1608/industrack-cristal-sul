@@ -14,6 +14,7 @@ import { Estoque } from './views/Estoque';
 import { PrestacaoContas } from './views/PrestacaoContas';
 import { MinhaViagem } from './views/MinhaViagem';
 import { PrintSale } from './views/PrintSale';
+import { LinhaDescartavel } from './views/LinhaDescartavel';
 
 const MainApp: React.FC = () => {
   const { currentUser } = useStore();
@@ -45,8 +46,16 @@ const MainApp: React.FC = () => {
   }
 
   const setActiveTab = (tab: string) => {
-    setActiveTabState(tab);
-    localStorage.setItem('activeTab', tab);
+    let targetMainTab = tab;
+    if (tab.includes(':')) {
+      const parts = tab.split(':');
+      targetMainTab = parts[0];
+      const subTab = parts[1];
+      localStorage.setItem('relatorio_subtab', subTab);
+      window.dispatchEvent(new CustomEvent('relatorio_subtab_change', { detail: subTab }));
+    }
+    setActiveTabState(targetMainTab);
+    localStorage.setItem('activeTab', targetMainTab);
   };
 
   if (!currentUser) return <Login />;
@@ -60,6 +69,7 @@ const MainApp: React.FC = () => {
       {currentTab === 'portaria' && <Portaria />}
       {currentTab === 'fila' && <FilaProducao />}
       {currentTab === 'estoque' && <Estoque />}
+      {currentTab === 'linha-descartavel' && <LinhaDescartavel />}
       {currentTab === 'abastecimento' && <Abastecimento />}
       {currentTab === 'prestacao-contas' && <PrestacaoContas />}
       {currentTab === 'cadastros' && <Cadastros />}

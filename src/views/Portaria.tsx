@@ -1,13 +1,14 @@
 import React, { useState, useMemo } from 'react';
 import { useStore } from '../store';
 import { Movement, VehicleType, OwnerType, Checklist, RegisteredVehicle, RegisteredClient } from '../types';
-import { Check, AlertCircle, HelpCircle, Truck, UserCheck, CheckSquare, RefreshCw, X } from 'lucide-react';
+import { Check, AlertCircle, HelpCircle, Truck, UserCheck, CheckSquare, RefreshCw, X, Boxes } from 'lucide-react';
 import { InlineClientEditor } from '../components/InlineClientEditor';
 import { OrderPhotoSelector } from '../components/OrderPhotoSelector';
 
 export const Portaria: React.FC = () => {
   const { 
     addMovement, 
+    deleteMovement,
     movements, 
     registerExit, 
     updateMovementDetails,
@@ -27,7 +28,7 @@ export const Portaria: React.FC = () => {
     updateRegisteredClient,
     driverSettlements = []
   } = useStore();
-  const isReadOnly = currentUser?.role === 'visualizador';
+  const isReadOnly = currentUser?.role === 'visualizador' || currentUser?.role === 'supervisor';
   const [view, setView] = useState<'entrada' | 'saida'>('entrada');
 
   const isSettlementDone = React.useCallback((movementId: string) => {
@@ -89,17 +90,23 @@ export const Portaria: React.FC = () => {
     }
   }, [customEntryPurposes]);
 
-  // Auto-calculate bypass based on category or purpose configurations
+  // Auto-calculate bypass based on category, purpose, or specific pre-registered vehicle configurations
   React.useEffect(() => {
-    const matchedCategory = customVehicleCategories.find(c => c.id === vehicleType);
-    const matchedPurpose = customEntryPurposes.find(p => p.id === entryPurpose);
+    const matchedVehicle = (registeredVehicles || []).find(v => (v?.plate || '').toUpperCase() === (plate || '').toUpperCase().trim());
     
-    const shouldBypass = 
-      (matchedCategory?.bypassProductionDefault || false) || 
-      (matchedPurpose?.bypassProductionDefault || false);
+    if (matchedVehicle && matchedVehicle.bypassProductionDefault !== undefined) {
+      setBypassProduction(matchedVehicle.bypassProductionDefault);
+    } else {
+      const matchedCategory = customVehicleCategories.find(c => c.id === vehicleType);
+      const matchedPurpose = customEntryPurposes.find(p => p.id === entryPurpose);
       
-    setBypassProduction(shouldBypass);
-  }, [vehicleType, entryPurpose, customVehicleCategories, customEntryPurposes]);
+      const shouldBypass = 
+        (matchedCategory?.bypassProductionDefault || false) || 
+        (matchedPurpose?.bypassProductionDefault || false);
+        
+      setBypassProduction(shouldBypass);
+    }
+  }, [plate, vehicleType, entryPurpose, customVehicleCategories, customEntryPurposes, registeredVehicles]);
 
   // Searching / Filtering corporate shortcuts
   const [filterPlate, setFilterPlate] = useState('');
@@ -115,18 +122,60 @@ export const Portaria: React.FC = () => {
   const [exitOrderPhoto, setExitOrderPhoto] = useState<string | null>(null);
   const [earlyExitReason, setEarlyExitReason] = useState<string>('');
   const [exitDriverName, setExitDriverName] = useState<string>('');
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const [deleteReason, setDeleteReason] = useState<string>('');
 
-  const activeVehicles = movements.filter(m => 
+  // Temporary Exit / Return states with driver selection
+  const [tempExitTargetId, setTempExitTargetId] = useState<string | null>(null);
+  const [tempExitType, setTempExitType] = useState<'almoco' | 'oficina' | null>(null);
+  const [tempExitDriver, setTempExitDriver] = useState<string>('');
+
+  const [tempReturnTargetId, setTempReturnTargetId] = useState<string | null>(null);
+  const [tempReturnDriver, setTempReturnDriver] = useState<string>('');
+
+  const activeVehicles = useMemo(() => movements.filter(m => 
     (m.unit || 'matriz') === (currentUser?.unit || 'matriz') &&
     m.status !== 'saida' && 
     m.gateStatus !== 'ausente_almoco' && 
     m.gateStatus !== 'ausente_oficina'
-  );
+  ), [movements, currentUser?.unit]);
 
-  const filteredActiveVehicles = activeVehicles.filter(v => 
+  const filteredActiveVehicles = useMemo(() => activeVehicles.filter(v => 
     v.plate.toUpperCase().includes(searchPlate.toUpperCase().trim()) &&
     v.driver.toLowerCase().includes(searchDriver.toLowerCase().trim())
-  );
+  ), [activeVehicles, searchPlate, searchDriver]);
+
+  const getDeletionBlockReason = React.useCallback((v: Movement) => {
+    if (v.status === 'concluido' || v.status === 'saida') {
+      return 'O veículo já concluiu a estadia ou realizou a saída.';
+    }
+    if (v.status === 'em_atendimento') {
+      return 'O veículo está em atendimento/operação no pátio.';
+    }
+    const hasSupply = (supplies || []).some(s => s.movementId === v.id);
+    if (hasSupply) {
+      return 'Este veículo já realizou abastecimento nesta estadia.';
+    }
+    const startedKanban = v.kanbanStep && v.kanbanStep !== 'aguardando_descarregamento';
+    if (startedKanban) {
+      return `Processo de produção já foi iniciado (Etapa atual: ${
+        v.kanbanStep === 'descarregamento' ? 'Descarregamento' :
+        v.kanbanStep === 'aguardando_carregamento' ? 'Aguardando Carregamento' :
+        v.kanbanStep === 'carregamento' ? 'Carregamento' :
+        v.kanbanStep === 'concluido' ? 'Concluído' : v.kanbanStep
+      }).`;
+    }
+    const hasProductionControl = v.productionControl && (
+      (v.productionControl.descarregadoQty !== undefined && v.productionControl.descarregadoQty > 0) ||
+      (v.productionControl.totalCarregado !== undefined && v.productionControl.totalCarregado > 0) ||
+      (v.productionControl.avariasDescarregamento && v.productionControl.avariasDescarregamento.length > 0) ||
+      (v.productionControl.avariasCarregamento && v.productionControl.avariasCarregamento.length > 0)
+    );
+    if (hasProductionControl) {
+      return 'Já há lançamentos de mercadorias, avarias ou vasilhames vinculados a esta entrada.';
+    }
+    return null;
+  }, [supplies]);
 
   const temporaryExitedVehicles = useMemo(() => {
     return movements.filter(m => 
@@ -136,24 +185,60 @@ export const Portaria: React.FC = () => {
     );
   }, [movements, currentUser?.unit]);
 
-  const handleConfirmRetorno = (v: Movement) => {
+  const handleConfirmTempExit = (movementId: string, type: 'almoco' | 'oficina', driverName: string) => {
     if (isReadOnly) {
       showToast('error', 'Acesso Restrito: Usuários com perfil de visualização não podem realizar registros.');
       return;
     }
-    registerGateTemporaryReturn(v.id, currentUser?.name || 'Portaria');
-    showToast('success', `Retorno de ${v.gateStatus === 'ausente_almoco' ? 'Almoço' : 'Oficina'} concluído! O veículo ${v.plate} retornou ao pátio.`);
+    const cleanDriver = driverName.trim();
+    if (!cleanDriver) {
+      showToast('error', 'Por favor, selecione o condutor.');
+      return;
+    }
+    const movement = movements.find(m => m.id === movementId);
+    if (movement) {
+      if (cleanDriver.toLowerCase() !== movement.driver.toLowerCase()) {
+        updateMovementDetails(movementId, { driver: cleanDriver });
+      }
+      registerGateTemporaryExit(movementId, type, currentUser?.name || 'Portaria');
+      showToast('success', `Saída para ${type === 'almoco' ? 'Almoço' : 'Oficina'} registrada com sucesso!`);
+    }
+    setTempExitTargetId(null);
+    setTempExitType(null);
+    setTempExitDriver('');
   };
 
-  const filteredPreRegistered = registeredVehicles.filter(pv => 
+  const handleConfirmTempReturn = (movementId: string, driverName: string) => {
+    if (isReadOnly) {
+      showToast('error', 'Acesso Restrito: Usuários com perfil de visualização não podem realizar registros.');
+      return;
+    }
+    const cleanDriver = driverName.trim();
+    if (!cleanDriver) {
+      showToast('error', 'Por favor, selecione o condutor.');
+      return;
+    }
+    const movement = movements.find(m => m.id === movementId);
+    if (movement) {
+      if (cleanDriver.toLowerCase() !== movement.driver.toLowerCase()) {
+        updateMovementDetails(movementId, { driver: cleanDriver });
+      }
+      registerGateTemporaryReturn(movementId, currentUser?.name || 'Portaria');
+      showToast('success', `Retorno de ${movement.gateStatus === 'ausente_almoco' ? 'Almoço' : 'Oficina'} concluído!`);
+    }
+    setTempReturnTargetId(null);
+    setTempReturnDriver('');
+  };
+
+  const filteredPreRegistered = useMemo(() => registeredVehicles.filter(pv => 
     pv.plate.toUpperCase().includes(filterPlate.toUpperCase().trim())
-  );
+  ), [registeredVehicles, filterPlate]);
 
-  const filteredCompanyDrivers = registeredDrivers.filter(cd => 
+  const filteredCompanyDrivers = useMemo(() => registeredDrivers.filter(cd => 
     cd.name.toLowerCase().includes(filterDriver.toLowerCase().trim())
-  );
+  ), [registeredDrivers, filterDriver]);
 
-  const filteredCompanyClients = registeredClients
+  const filteredCompanyClients = useMemo(() => registeredClients
     .filter(cc => !!cc.comprasNaEmpresa)
     .filter(cc => cc.name.toLowerCase().includes(filterClient.toLowerCase().trim()))
     .sort((a, b) => {
@@ -172,7 +257,7 @@ export const Portaria: React.FC = () => {
         return valA.localeCompare(valB, undefined, { numeric: true, sensitivity: 'base' });
       }
       return a.name.localeCompare(b.name);
-    });
+    }), [registeredClients, filterClient]);
 
   const showToast = (type: 'success' | 'info' | 'error', message: string) => {
     setNotification({ type, message });
@@ -183,11 +268,14 @@ export const Portaria: React.FC = () => {
     setPlate(val);
 
     // If matches a pre-registered vehicle, pre-fill its category and ownerType
-    const matched = registeredVehicles.find(pv => pv.plate.toUpperCase() === val.toUpperCase().trim());
+    const matched = (registeredVehicles || []).find(pv => (pv?.plate || '').toUpperCase() === (val || '').toUpperCase().trim());
     if (matched) {
       setOwnerType(matched.ownerType);
       handleVehicleTypeChange(matched.vehicleType);
       setAvgVasilhames(matched.averageVasilhames !== undefined ? matched.averageVasilhames : '');
+      if (matched.defaultPurposeId) {
+        setEntryPurpose(matched.defaultPurposeId);
+      }
 
       let foundDriverName = '';
       let foundClientName = '';
@@ -232,6 +320,9 @@ export const Portaria: React.FC = () => {
     const matched = registeredVehicles.find(v => v.plate === p);
     if (matched) {
       setAvgVasilhames(matched.averageVasilhames !== undefined ? matched.averageVasilhames : '');
+      if (matched.defaultPurposeId) {
+        setEntryPurpose(matched.defaultPurposeId);
+      }
       let foundDriverName = '';
       let foundClientName = '';
 
@@ -265,31 +356,74 @@ export const Portaria: React.FC = () => {
     }
   };
 
-  const selectDriver = (name: string) => {
-    setDriver(name);
+  const handleDriverChange = (val: string) => {
+    setDriver(val);
 
-    // Let's check if there is a client linked to this driver
-    const matchedDriver = registeredDrivers.find(d => d.name === name);
+    const matchedDriver = (registeredDrivers || []).find(d => (d?.name || '').toLowerCase() === (val || '').toLowerCase().trim());
     if (matchedDriver) {
-      const linkedClient = registeredClients.find(c => c.defaultDriverId === matchedDriver.id || c.driverIds?.includes(matchedDriver.id));
+      let foundPlate = '';
+      let foundClientName = '';
+
+      // 1. Find vehicle linked to this driver
+      const matchedVeh = registeredVehicles.find(v => v.defaultDriverId === matchedDriver.id);
+      if (matchedVeh) {
+        setPlate(matchedVeh.plate);
+        setOwnerType(matchedVeh.ownerType);
+        handleVehicleTypeChange(matchedVeh.vehicleType);
+        setAvgVasilhames(matchedVeh.averageVasilhames !== undefined ? matchedVeh.averageVasilhames : '');
+        if (matchedVeh.defaultPurposeId) {
+          setEntryPurpose(matchedVeh.defaultPurposeId);
+        }
+        foundPlate = matchedVeh.plate;
+      }
+
+      // 2. Find client linked to this driver or the found vehicle
+      const linkedClient = registeredClients.find(c => 
+        c.defaultDriverId === matchedDriver.id || 
+        c.driverIds?.includes(matchedDriver.id) ||
+        (matchedVeh && (c.defaultVehicleId === matchedVeh.id || c.vehicleIds?.includes(matchedVeh.id)))
+      );
+
       if (linkedClient) {
         setClient(linkedClient.name);
-        showToast('info', `Motorista ${name} selecionado. Cliente "${linkedClient.name}" auto-vinculado.`);
-        
-        // Let's check if the client has a linked vehicle as well, and prefill it too!
+        foundClientName = linkedClient.name;
+      } else {
+        setClient('');
+      }
+
+      // If we didn't find a vehicle via the driver directly, but the linked client has a default vehicle, prefill it!
+      if (!matchedVeh && linkedClient) {
         const defaultVehicleId = linkedClient.defaultVehicleId || (linkedClient.vehicleIds && linkedClient.vehicleIds.length === 1 ? linkedClient.vehicleIds[0] : undefined);
         if (defaultVehicleId) {
-          const matchedVeh = registeredVehicles.find(v => v.id === defaultVehicleId);
-          if (matchedVeh) {
-            setPlate(matchedVeh.plate);
-            setOwnerType(matchedVeh.ownerType);
-            handleVehicleTypeChange(matchedVeh.vehicleType);
+          const clientVeh = registeredVehicles.find(v => v.id === defaultVehicleId);
+          if (clientVeh) {
+            setPlate(clientVeh.plate);
+            setOwnerType(clientVeh.ownerType);
+            handleVehicleTypeChange(clientVeh.vehicleType);
+            setAvgVasilhames(clientVeh.averageVasilhames !== undefined ? clientVeh.averageVasilhames : '');
+            if (clientVeh.defaultPurposeId) {
+              setEntryPurpose(clientVeh.defaultPurposeId);
+            }
+            foundPlate = clientVeh.plate;
           }
         }
-        return;
+      }
+
+      // Show toast message with auto-fill info
+      if (foundPlate && foundClientName) {
+        showToast('info', `Motorista "${matchedDriver.name}" selecionado. Placa "${foundPlate}" e Cliente "${foundClientName}" auto-vinculados.`);
+      } else if (foundPlate) {
+        showToast('info', `Motorista "${matchedDriver.name}" selecionado. Placa "${foundPlate}" auto-vinculada.`);
+      } else if (foundClientName) {
+        showToast('info', `Motorista "${matchedDriver.name}" selecionado. Cliente "${foundClientName}" auto-vinculado.`);
+      } else {
+        showToast('info', `Motorista "${matchedDriver.name}" selecionado.`);
       }
     }
-    showToast('info', `Motorista corporativo ${name} selecionado.`);
+  };
+
+  const selectDriver = (name: string) => {
+    handleDriverChange(name);
   };
 
   const selectClient = (cli: typeof registeredClients[0]) => {
@@ -305,6 +439,9 @@ export const Portaria: React.FC = () => {
         setPlate(foundVeh.plate);
         setOwnerType(foundVeh.ownerType);
         handleVehicleTypeChange(foundVeh.vehicleType);
+        if (foundVeh.defaultPurposeId) {
+          setEntryPurpose(foundVeh.defaultPurposeId);
+        }
         extraMsg += `${extraMsg ? ' e' : ''} veículo ${foundVeh.plate}`;
         vehicleToUse = foundVeh;
       }
@@ -313,6 +450,9 @@ export const Portaria: React.FC = () => {
       const curPlate = plate.toUpperCase().trim();
       if (curPlate) {
         vehicleToUse = registeredVehicles.find(v => v.plate.toUpperCase() === curPlate);
+        if (vehicleToUse && vehicleToUse.defaultPurposeId) {
+          setEntryPurpose(vehicleToUse.defaultPurposeId);
+        }
       }
     }
 
@@ -345,6 +485,12 @@ export const Portaria: React.FC = () => {
 
   const handlePurposeChange = (purpose: string) => {
     setEntryPurpose(purpose);
+    const matchedPurp = customEntryPurposes.find(p => p.id === purpose);
+    if (matchedPurp) {
+      setBypassProduction(matchedPurp.bypassProductionDefault);
+    } else if (purpose === 'linha_descartavel') {
+      setBypassProduction(true);
+    }
   };
 
   const handleVehicleTypeChange = (type: VehicleType) => {
@@ -442,6 +588,14 @@ export const Portaria: React.FC = () => {
         updates.averageVasilhames = vasilhamesNum;
         needsUpdate = true;
       }
+      if (foundVehicle.bypassProductionDefault !== bypassProduction) {
+        updates.bypassProductionDefault = bypassProduction;
+        needsUpdate = true;
+      }
+      if (foundVehicle.defaultPurposeId !== entryPurpose) {
+        updates.defaultPurposeId = entryPurpose;
+        needsUpdate = true;
+      }
       if (needsUpdate) {
         updateRegisteredVehicle(vehicleId, updates);
       }
@@ -454,6 +608,8 @@ export const Portaria: React.FC = () => {
         ownerType,
         defaultDriverId: driverId, // Automatically link the driver here!
         averageVasilhames: vasilhamesNum,
+        bypassProductionDefault: bypassProduction,
+        defaultPurposeId: entryPurpose,
         unit: currentUser?.unit || 'matriz'
       });
       autoRegisteredMsg += autoRegisteredMsg ? ' e veículo' : 'veículo';
@@ -658,16 +814,27 @@ export const Portaria: React.FC = () => {
                 <p className="text-lg font-mono font-bold text-slate-850 tracking-wider mb-3">{activeExitTarget.plate}</p>
                 
                 <label className="block text-[10px] font-extrabold text-slate-500 uppercase mb-1">
-                  Motorista na Saída (Pode ser alterado) *
+                  Motorista na Saída (Selecione um motorista próprio cadastrado) *
                 </label>
-                <input
-                  type="text"
+                <select
                   value={exitDriverName}
                   onChange={(e) => setExitDriverName(e.target.value)}
-                  list="company-drivers"
                   className="w-full bg-white border border-slate-300 rounded text-xs p-2.5 outline-none focus:border-blue-450 focus:ring-1 focus:ring-blue-450 shadow-3xs font-semibold text-slate-700"
-                  placeholder="Selecione ou digite o motorista que está saindo"
-                />
+                >
+                  <option value="">-- Selecione o Motorista Próprio --</option>
+                  {activeExitTarget.driver && !registeredDrivers.some(d => d.name.toLowerCase() === activeExitTarget.driver.toLowerCase() && d.driverType === 'interno') && (
+                    <option value={activeExitTarget.driver}>{activeExitTarget.driver} (Atual)</option>
+                  )}
+                  {registeredDrivers
+                    .filter(d => d.driverType === 'interno')
+                    .sort((a, b) => a.name.localeCompare(b.name))
+                    .map(d => (
+                      <option key={d.id} value={d.name}>
+                        {d.name}
+                      </option>
+                    ))
+                  }
+                </select>
               </div>
               
               {isOwnFleet && !isSettlementCompleted && (
@@ -683,14 +850,18 @@ export const Portaria: React.FC = () => {
                 </div>
               )}
 
-              {(activeExitTarget.purpose === 'producao' || !activeExitTarget.bypassProduction) && (
-                <div className="mb-4">
-                  <OrderPhotoSelector 
-                    onPhotoSelected={setExitOrderPhoto} 
-                    selectedPhoto={exitOrderPhoto} 
-                  />
-                </div>
-              )}
+              <div className="mb-4">
+                <OrderPhotoSelector 
+                  onPhotoSelected={setExitOrderPhoto} 
+                  selectedPhoto={exitOrderPhoto} 
+                  label={
+                    <>
+                      Foto do Veículo / Comprovante de Saída <span className="text-slate-400 font-normal italic">(Opcional)</span>
+                    </>
+                  }
+                  previewLabel="Foto de Saída Carregada"
+                />
+              </div>
 
                {needsReason && (
                 <div className={`${needsOwnFleetBypassReason ? 'bg-rose-50 border border-rose-200 text-rose-800' : 'bg-amber-50 border border-amber-200 text-amber-800'} rounded-lg p-3.5 text-left mb-4`}>
@@ -755,16 +926,279 @@ export const Portaria: React.FC = () => {
         </div>
       )}
 
+      {/* Confirmation Modal for Deletion */}
+      {deleteConfirmId && (() => {
+        const target = movements.find(m => m.id === deleteConfirmId);
+        if (!target) return null;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+            <div className="bg-white border border-slate-200 rounded-xl shadow-2xl max-w-md w-full overflow-hidden animate-in zoom-in-95 duration-200">
+              <div className="bg-slate-50 px-4 py-3 border-b border-slate-200 flex justify-between items-center">
+                <span className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-2">
+                  <AlertCircle className="text-rose-600" size={16} /> Confirmar Exclusão de Registro
+                </span>
+                <button 
+                  onClick={() => {
+                    setDeleteConfirmId(null);
+                    setDeleteReason('');
+                  }} 
+                  className="text-slate-400 hover:text-slate-600"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <div className="p-5">
+                <p className="text-sm font-medium text-slate-600 mb-3 text-center">
+                  Tem certeza de que deseja <strong className="text-rose-700 font-extrabold">excluir permanentemente</strong> a entrada deste veículo?
+                </p>
+                
+                <div className="bg-slate-50 border border-slate-200 rounded-lg py-3 px-4 mb-4">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">Veículo / Placa</p>
+                  <p className="text-lg font-mono font-bold text-slate-800 tracking-wider mb-2">{target.plate}</p>
+                  
+                  <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">Motorista</p>
+                  <p className="text-xs font-bold text-slate-700">{target.driver}</p>
+                </div>
+
+                <div className="space-y-1.5 text-left mb-4">
+                  <label className="block text-[10px] font-extrabold text-slate-500 uppercase tracking-wider">
+                    Motivo da Exclusão (Obrigatório) *
+                  </label>
+                  <textarea
+                    rows={3}
+                    value={deleteReason}
+                    onChange={(e) => setDeleteReason(e.target.value)}
+                    placeholder="Informe detalhadamente a justificativa para excluir este registro (ex: erro de digitação de placa, cancelamento de viagem, duplicidade)..."
+                    className="w-full text-xs p-2.5 bg-white border border-slate-300 rounded focus:border-rose-500 focus:outline-none focus:ring-1 focus:ring-rose-500 font-semibold text-slate-700"
+                  />
+                </div>
+
+                <p className="text-[10px] text-slate-400 font-semibold text-center uppercase tracking-wider leading-relaxed">
+                  ⚠️ ATENÇÃO: Esta ação é irreversível e removerá o veículo de todas as filas e painéis de controle.
+                </p>
+              </div>
+              <div className="bg-slate-50 px-4 py-3 border-t border-slate-200 flex justify-end gap-2">
+                <button 
+                  onClick={() => {
+                    setDeleteConfirmId(null);
+                    setDeleteReason('');
+                  }} 
+                  className="px-4 py-2 text-xs font-bold text-slate-500 hover:text-slate-700 uppercase tracking-widest"
+                >
+                  Cancelar
+                </button>
+                <button 
+                  onClick={() => {
+                    if (deleteReason.trim() === '') {
+                      showToast('error', 'Por favor, informe o motivo da exclusão.');
+                      return;
+                    }
+                    deleteMovement(target.id, deleteReason.trim());
+                    showToast('success', `Registro do veículo ${target.plate} excluído com sucesso!`);
+                    setDeleteConfirmId(null);
+                    setDeleteReason('');
+                  }} 
+                  disabled={deleteReason.trim() === ''}
+                  className={`px-5 py-2 rounded text-xs font-bold uppercase tracking-widest shadow-sm transition-colors ${
+                    deleteReason.trim() === ''
+                      ? 'bg-slate-300 text-slate-500 cursor-not-allowed opacity-50'
+                      : 'bg-rose-600 hover:bg-rose-700 text-white cursor-pointer'
+                  }`}
+                >
+                  Confirmar Exclusão
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Temporary Exit Modal (Almoço / Oficina) */}
+      {tempExitTargetId && tempExitType && (() => {
+        const target = movements.find(m => m.id === tempExitTargetId);
+        if (!target) return null;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+            <div className="bg-white border border-slate-200 rounded-xl shadow-2xl max-w-md w-full overflow-hidden animate-in zoom-in-95 duration-200">
+              <div className="bg-slate-50 px-4 py-3 border-b border-slate-200 flex justify-between items-center">
+                <span className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-2">
+                  <AlertCircle className="text-blue-600" size={16} /> Saída Temporária ({tempExitType === 'almoco' ? 'Almoço 🍽️' : 'Oficina 🔧'})
+                </span>
+                <button 
+                  onClick={() => {
+                    setTempExitTargetId(null);
+                    setTempExitType(null);
+                    setTempExitDriver('');
+                  }} 
+                  className="text-slate-400 hover:text-slate-600"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <div className="p-5">
+                <p className="text-sm font-medium text-slate-600 mb-3 text-center font-sans">
+                  Confirme a saída temporária do veículo para <strong className="text-blue-700 font-extrabold">{tempExitType === 'almoco' ? 'Almoço' : 'Oficina'}</strong>.
+                </p>
+                
+                <div className="bg-slate-50 border border-slate-200 rounded-lg py-3 px-4 mb-4">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">Veículo / Placa</p>
+                  <p className="text-lg font-mono font-bold text-slate-800 tracking-wider mb-2">{target.plate}</p>
+                  
+                  <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">Condutor Atual</p>
+                  <p className="text-xs font-bold text-slate-700 mb-3">{target.driver}</p>
+
+                  <label className="block text-[10px] font-extrabold text-slate-500 uppercase tracking-wider mb-1">
+                    Selecionar Motorista para esta Ação *
+                  </label>
+                  <select
+                    value={tempExitDriver}
+                    onChange={(e) => setTempExitDriver(e.target.value)}
+                    className="w-full text-xs p-2.5 bg-white border border-slate-300 rounded focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500 font-semibold text-slate-700"
+                  >
+                    <option value="">-- Selecione o Motorista --</option>
+                    {target.driver && !registeredDrivers.some(d => d.name.toLowerCase() === target.driver.toLowerCase()) && (
+                      <option value={target.driver}>{target.driver} (Atual)</option>
+                    )}
+                    {registeredDrivers
+                      .sort((a, b) => a.name.localeCompare(b.name))
+                      .map(d => (
+                        <option key={d.id} value={d.name}>
+                          {d.name} ({d.driverType === 'interno' ? 'Frota/Próprio' : 'Cliente'})
+                        </option>
+                      ))
+                    }
+                  </select>
+                </div>
+
+                <p className="text-[10px] text-slate-400 font-semibold text-center uppercase tracking-wider leading-relaxed">
+                  💡 Se outra pessoa for levar o veículo, altere o motorista acima para que fique devidamente vinculado a esta movimentação.
+                </p>
+              </div>
+              <div className="bg-slate-50 px-4 py-3 border-t border-slate-200 flex justify-end gap-2">
+                <button 
+                  onClick={() => {
+                    setTempExitTargetId(null);
+                    setTempExitType(null);
+                    setTempExitDriver('');
+                  }} 
+                  className="px-4 py-2 text-xs font-bold text-slate-500 hover:text-slate-700 uppercase tracking-widest"
+                >
+                  Cancelar
+                </button>
+                <button 
+                  onClick={() => handleConfirmTempExit(target.id, tempExitType, tempExitDriver)} 
+                  disabled={!tempExitDriver.trim()}
+                  className={`px-5 py-2 rounded text-xs font-bold uppercase tracking-widest shadow-sm transition-colors ${
+                    !tempExitDriver.trim()
+                      ? 'bg-slate-300 text-slate-500 cursor-not-allowed opacity-50'
+                      : 'bg-blue-600 hover:bg-blue-700 text-white cursor-pointer'
+                  }`}
+                >
+                  Confirmar Saída
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Temporary Return Modal (Almoço / Oficina) */}
+      {tempReturnTargetId && (() => {
+        const target = movements.find(m => m.id === tempReturnTargetId);
+        if (!target) return null;
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+            <div className="bg-white border border-slate-200 rounded-xl shadow-2xl max-w-md w-full overflow-hidden animate-in zoom-in-95 duration-200">
+              <div className="bg-slate-50 px-4 py-3 border-b border-slate-200 flex justify-between items-center">
+                <span className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-2">
+                  <AlertCircle className="text-emerald-600" size={16} /> Confirmar Retorno ({target.gateStatus === 'ausente_almoco' ? 'Almoço 🍽️' : 'Oficina 🔧'})
+                </span>
+                <button 
+                  onClick={() => {
+                    setTempReturnTargetId(null);
+                    setTempReturnDriver('');
+                  }} 
+                  className="text-slate-400 hover:text-slate-600"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+              <div className="p-5">
+                <p className="text-sm font-medium text-slate-600 mb-3 text-center font-sans">
+                  Confirme o retorno do veículo do <strong className="text-emerald-700 font-extrabold">{target.gateStatus === 'ausente_almoco' ? 'Almoço' : 'Oficina'}</strong> ao pátio.
+                </p>
+                
+                <div className="bg-slate-50 border border-slate-200 rounded-lg py-3 px-4 mb-4">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">Veículo / Placa</p>
+                  <p className="text-lg font-mono font-bold text-slate-800 tracking-wider mb-2">{target.plate}</p>
+                  
+                  <p className="text-[10px] font-bold text-slate-400 uppercase mb-1">Último Condutor Registrado</p>
+                  <p className="text-xs font-bold text-slate-700 mb-3">{target.driver}</p>
+
+                  <label className="block text-[10px] font-extrabold text-slate-500 uppercase tracking-wider mb-1">
+                    Selecionar Motorista para o Retorno *
+                  </label>
+                  <select
+                    value={tempReturnDriver}
+                    onChange={(e) => setTempReturnDriver(e.target.value)}
+                    className="w-full text-xs p-2.5 bg-white border border-slate-300 rounded focus:border-emerald-500 focus:outline-none focus:ring-1 focus:ring-emerald-500 font-semibold text-slate-700"
+                  >
+                    <option value="">-- Selecione o Motorista --</option>
+                    {target.driver && !registeredDrivers.some(d => d.name.toLowerCase() === target.driver.toLowerCase()) && (
+                      <option value={target.driver}>{target.driver} (Atual)</option>
+                    )}
+                    {registeredDrivers
+                      .sort((a, b) => a.name.localeCompare(b.name))
+                      .map(d => (
+                        <option key={d.id} value={d.name}>
+                          {d.name} ({d.driverType === 'interno' ? 'Frota/Próprio' : 'Cliente'})
+                        </option>
+                      ))
+                    }
+                  </select>
+                </div>
+
+                <p className="text-[10px] text-slate-400 font-semibold text-center uppercase tracking-wider leading-relaxed">
+                  💡 Se outra pessoa estiver retornando com o veículo, altere o motorista acima para manter o registro correto no pátio.
+                </p>
+              </div>
+              <div className="bg-slate-50 px-4 py-3 border-t border-slate-200 flex justify-end gap-2">
+                <button 
+                  onClick={() => {
+                    setTempReturnTargetId(null);
+                    setTempReturnDriver('');
+                  }} 
+                  className="px-4 py-2 text-xs font-bold text-slate-500 hover:text-slate-700 uppercase tracking-widest"
+                >
+                  Cancelar
+                </button>
+                <button 
+                  onClick={() => handleConfirmTempReturn(target.id, tempReturnDriver)} 
+                  disabled={!tempReturnDriver.trim()}
+                  className={`px-5 py-2 rounded text-xs font-bold uppercase tracking-widest shadow-sm transition-colors ${
+                    !tempReturnDriver.trim()
+                      ? 'bg-slate-300 text-slate-500 cursor-not-allowed opacity-50'
+                      : 'bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer'
+                  }`}
+                >
+                  Confirmar Retorno
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Tabs */}
-      <div className="flex bg-slate-200/80 rounded border border-slate-200 self-start p-1 shrink-0">
+      <div className="flex bg-slate-200/80 rounded border border-slate-200 self-start p-1 shrink-0 overflow-x-auto max-w-full">
         <button
-          className={`px-4 py-1.5 text-xs font-bold uppercase rounded-sm transition-colors ${view === 'entrada' ? 'bg-white shadow text-slate-800' : 'text-slate-500 hover:text-slate-700'}`}
+          className={`px-4 py-1.5 text-xs font-bold uppercase rounded-sm transition-colors whitespace-nowrap ${view === 'entrada' ? 'bg-white shadow text-slate-800' : 'text-slate-500 hover:text-slate-700'}`}
           onClick={() => setView('entrada')}
         >
           REGISTRAR ENTRADA
         </button>
         <button
-          className={`px-4 py-1.5 text-xs font-bold uppercase rounded-sm transition-colors ${view === 'saida' ? 'bg-white shadow text-slate-800' : 'text-slate-500 hover:text-slate-700'}`}
+          className={`px-4 py-1.5 text-xs font-bold uppercase rounded-sm transition-colors whitespace-nowrap ${view === 'saida' ? 'bg-white shadow text-slate-800' : 'text-slate-500 hover:text-slate-700'}`}
           onClick={() => setView('saida')}
         >
           REGISTRAR SAÍDA
@@ -902,8 +1336,8 @@ export const Portaria: React.FC = () => {
                         className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 uppercase font-mono shadow-sm" 
                       />
                       {(() => {
-                        const matchedVeh = registeredVehicles.find(v => v.plate.toUpperCase() === plate.toUpperCase().trim());
-                        const isAlreadyActive = plate.trim() !== '' && activeVehicles.some(m => m.plate.toUpperCase().trim() === plate.toUpperCase().trim());
+                        const matchedVeh = (registeredVehicles || []).find(v => (v?.plate || '').toUpperCase() === (plate || '').toUpperCase().trim());
+                        const isAlreadyActive = (plate || '').trim() !== '' && (activeVehicles || []).some(m => (m?.plate || '').toUpperCase().trim() === (plate || '').toUpperCase().trim());
                         
                         return (
                           <div className="flex flex-col gap-1 mt-1">
@@ -935,7 +1369,7 @@ export const Portaria: React.FC = () => {
                         required 
                         placeholder="Nome do Motorista" 
                         value={driver} 
-                        onChange={e => setDriver(e.target.value)} 
+                        onChange={e => handleDriverChange(e.target.value)} 
                         list="company-drivers"
                         className="w-full bg-white border border-slate-200 rounded text-sm p-2 outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 shadow-sm" 
                       />
@@ -996,6 +1430,18 @@ export const Portaria: React.FC = () => {
                     </div>
                   </div>
 
+                  {entryPurpose === 'linha_descartavel' && (
+                    <div className="p-3 bg-amber-50/90 border border-amber-200/90 rounded-xl text-xs text-amber-950 flex items-start gap-2.5 shadow-xs">
+                      <Boxes size={18} className="text-amber-600 shrink-0 mt-0.5" />
+                      <div className="space-y-0.5">
+                        <p className="font-extrabold uppercase tracking-tight text-[11px] text-amber-900">📦 Finalidade: Apenas Linha Descartável</p>
+                        <p className="text-[11px] text-amber-800 leading-relaxed font-medium">
+                          Este veículo registrará entrada no pátio ativo da empresa para carregamento/expedição de produtos descartáveis, mas <strong>NÃO entrará na fila de produção de garrafões/retornável</strong>.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <label className="block text-[10px] font-bold text-slate-500 uppercase mb-1">CLIENTE (OPCIONAL)</label>
@@ -1005,7 +1451,7 @@ export const Portaria: React.FC = () => {
                         onChange={e => {
                           const val = e.target.value;
                           setClient(val);
-                          const matchedCli = registeredClients.find(c => c.name.toLowerCase() === val.toLowerCase().trim());
+                          const matchedCli = (registeredClients || []).find(c => (c?.name || '').toLowerCase() === (val || '').toLowerCase().trim());
                           if (matchedCli) {
                             selectClient(matchedCli);
                           }
@@ -1158,8 +1604,13 @@ export const Portaria: React.FC = () => {
                     <div className="flex gap-1">
                       <button 
                         onClick={() => {
-                          registerGateTemporaryExit(v.id, 'almoco', currentUser?.name || 'Portaria');
-                          showToast('success', `Saída para Almoço registrada para o veículo ${v.plate}`);
+                          if (isReadOnly) {
+                            showToast('error', 'Acesso Restrito: Usuários com perfil de visualização não podem realizar registros.');
+                            return;
+                          }
+                          setTempExitTargetId(v.id);
+                          setTempExitType('almoco');
+                          setTempExitDriver(v.driver);
                         }}
                         disabled={isReadOnly}
                         className={`px-2 py-1.5 rounded text-[9px] font-extrabold transition-all uppercase tracking-wider flex items-center gap-0.5 ${
@@ -1173,8 +1624,13 @@ export const Portaria: React.FC = () => {
                       </button>
                       <button 
                         onClick={() => {
-                          registerGateTemporaryExit(v.id, 'oficina', currentUser?.name || 'Portaria');
-                          showToast('success', `Saída para Oficina registrada para o veículo ${v.plate}`);
+                          if (isReadOnly) {
+                            showToast('error', 'Acesso Restrito: Usuários com perfil de visualização não podem realizar registros.');
+                            return;
+                          }
+                          setTempExitTargetId(v.id);
+                          setTempExitType('oficina');
+                          setTempExitDriver(v.driver);
                         }}
                         disabled={isReadOnly}
                         className={`px-2 py-1.5 rounded text-[9px] font-extrabold transition-all uppercase tracking-wider flex items-center gap-0.5 ${
@@ -1186,6 +1642,33 @@ export const Portaria: React.FC = () => {
                       >
                         <span>🔧 Oficina</span>
                       </button>
+
+                      {(() => {
+                        const blockReason = getDeletionBlockReason(v);
+                        return (
+                          <button 
+                            onClick={() => {
+                              if (blockReason) {
+                                showToast('error', `Não é possível excluir: ${blockReason}`);
+                                return;
+                              }
+                              setDeleteConfirmId(v.id);
+                              setDeleteReason('');
+                            }}
+                            disabled={isReadOnly}
+                            className={`px-2 py-1.5 rounded text-[9px] font-extrabold transition-all uppercase tracking-wider flex items-center gap-0.5 ${
+                              isReadOnly
+                                ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed opacity-60'
+                                : blockReason
+                                ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed opacity-60'
+                                : 'bg-rose-50 text-rose-700 hover:bg-rose-100 border border-rose-200 cursor-pointer'
+                            }`}
+                            title={blockReason ? `Exclusão bloqueada: ${blockReason}` : "Excluir entrada do pátio (cancelar entrada)"}
+                          >
+                            <span>{blockReason ? '🔒 Bloqueado' : '🗑️ Excluir'}</span>
+                          </button>
+                        );
+                      })()}
                     </div>
 
                     <button 
@@ -1258,7 +1741,14 @@ export const Portaria: React.FC = () => {
                     </div>
                     <div className="w-full sm:w-auto flex items-center justify-between sm:justify-end gap-3">
                       <button 
-                        onClick={() => handleConfirmRetorno(v)}
+                        onClick={() => {
+                          if (isReadOnly) {
+                            showToast('error', 'Acesso Restrito: Usuários com perfil de visualização não podem realizar registros.');
+                            return;
+                          }
+                          setTempReturnTargetId(v.id);
+                          setTempReturnDriver(v.driver);
+                        }}
                         disabled={isReadOnly}
                         className={`px-4 py-2 rounded text-[10px] font-bold transition-all uppercase tracking-widest shadow-xs flex items-center gap-1 w-full sm:w-auto justify-center ${
                           isReadOnly 

@@ -36,7 +36,7 @@ export const Configuracao: React.FC = () => {
     movements = []
   } = useStore();
 
-  const isReadOnly = currentUser?.role === 'visualizador';
+  const isReadOnly = currentUser?.role === 'visualizador' || currentUser?.role === 'supervisor';
 
   const realAverages = calculateRealAverages(movements, currentUser?.unit);
 
@@ -130,7 +130,7 @@ export const Configuracao: React.FC = () => {
     // Process general clear
     clearDatabase();
     setConfirmInput('');
-    setClearSuccess('Todos os registros e cadastros foram excluídos! (As categorias de veículos foram preservadas).');
+    setClearSuccess('Todos os registros, cadastros de veículos/motoristas/clientes e usuários do sistema foram excluídos com sucesso!');
     setTimeout(() => setClearSuccess(''), 6000);
   };
 

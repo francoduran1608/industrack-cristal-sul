@@ -13,13 +13,52 @@ interface DynamicTableProps {
   data: any[];
   columns: ColumnDef[];
   className?: string;
+  onRowClick?: (row: any, index: number) => void;
+  renderExpandedRow?: (row: any, index: number) => React.ReactNode;
 }
 
-export const DynamicTable: React.FC<DynamicTableProps> = ({ id, data, columns, className }) => {
+export const DynamicTable: React.FC<DynamicTableProps> = ({ id, data, columns, className, onRowClick, renderExpandedRow }) => {
   const [colOrder, setColOrder] = useState<string[]>(columns.map(c => c.id));
   const [colWidths, setColWidths] = useState<Record<string, number>>(
     columns.reduce((acc, col) => ({ ...acc, [col.id]: col.defaultWidth || 150 }), {})
   );
+
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Handle wheel events for smooth horizontal scrolling and to prevent history navigation
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleWheel = (e: WheelEvent) => {
+      // If the gesture is primarily horizontal scroll
+      if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        // Check if there is horizontal overflow that can be scrolled
+        const maxScroll = container.scrollWidth - container.clientWidth;
+        if (maxScroll > 0) {
+          // Check if we can scroll or if we should just prevent history navigation
+          // Scrolling left (going back in scroll position): deltaX is negative
+          // Scrolling right (going forward in scroll position): deltaX is positive
+          const canScrollLeft = container.scrollLeft > 0 && e.deltaX < 0;
+          const canScrollRight = container.scrollLeft < maxScroll && e.deltaX > 0;
+
+          if (canScrollLeft || canScrollRight) {
+            container.scrollLeft += e.deltaX;
+            e.preventDefault();
+          } else {
+            // Even if we are at the edge, prevent default on horizontal swipes to avoid
+            // triggering browser's back/forward history page navigation within the app.
+            e.preventDefault();
+          }
+        }
+      }
+    };
+
+    container.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      container.removeEventListener('wheel', handleWheel);
+    };
+  }, []);
 
   // Load saved state
   useEffect(() => {
@@ -113,10 +152,10 @@ export const DynamicTable: React.FC<DynamicTableProps> = ({ id, data, columns, c
   const orderedColumns = colOrder.map(id => columns.find(c => c.id === id)!).filter(Boolean);
 
   return (
-    <div className="overflow-x-auto border border-slate-200 rounded-lg shadow-sm bg-white">
+    <div ref={containerRef} className="overflow-x-auto border border-slate-200 rounded-lg shadow-sm bg-white">
       <table className={`w-full text-left text-xs border-collapse font-sans ${className || ''}`}>
-        <thead>
-          <tr className="bg-slate-100/80 border-b border-slate-200 text-slate-500 uppercase tracking-wider font-extrabold text-[9px] relative">
+        <thead className="sticky top-0 z-10 bg-slate-100">
+          <tr className="bg-slate-100 border-b border-slate-200 text-slate-500 uppercase tracking-wider font-extrabold text-[9px] relative">
             {orderedColumns.map((col, idx) => (
               <th 
                 key={col.id} 
@@ -155,19 +194,28 @@ export const DynamicTable: React.FC<DynamicTableProps> = ({ id, data, columns, c
         </thead>
         <tbody className="divide-y divide-slate-100">
           {data.length > 0 ? (
-            data.map((row, i) => (
-              <tr key={row.id || i} className="hover:bg-slate-50/50 align-top group">
-                {orderedColumns.map((col) => (
-                  <td 
-                    key={col.id} 
-                    className="py-3 px-3 leading-relaxed break-words"
-                    style={{ width: colWidths[col.id], minWidth: colWidths[col.id], maxWidth: colWidths[col.id] }}
+            data.map((row, i) => {
+              const isClickable = !!onRowClick;
+              return (
+                <React.Fragment key={row.id || i}>
+                  <tr 
+                    onClick={() => onRowClick?.(row, i)}
+                    className={`hover:bg-slate-50/50 align-top group transition-colors ${isClickable ? 'cursor-pointer' : ''}`}
                   >
-                    {col.cell(row)}
-                  </td>
-                ))}
-              </tr>
-            ))
+                    {orderedColumns.map((col) => (
+                      <td 
+                        key={col.id} 
+                        className="py-3 px-3 leading-relaxed break-words"
+                        style={{ width: colWidths[col.id], minWidth: colWidths[col.id], maxWidth: colWidths[col.id] }}
+                      >
+                        {col.cell(row)}
+                      </td>
+                    ))}
+                  </tr>
+                  {renderExpandedRow && renderExpandedRow(row, i)}
+                </React.Fragment>
+              );
+            })
           ) : (
             <tr>
               <td colSpan={columns.length} className="py-8 text-center text-slate-400 font-medium bg-slate-50/30 text-xs">

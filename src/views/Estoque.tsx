@@ -32,7 +32,8 @@ export const Estoque: React.FC = () => {
   } = useStore();
 
   const currentUserUnit = currentUser?.unit || 'matriz';
-  const unitMovements = (movements || []).filter(m => (m.unit || 'matriz') === currentUserUnit);
+  const isReadOnly = currentUser?.role === 'visualizador' || currentUser?.role === 'supervisor';
+  const unitMovements = (movements || []).filter(m => !m.isInitialTrip && (m.unit || 'matriz') === currentUserUnit);
 
   const [activeTab, setActiveTabTab] = useState<'balance' | 'alerts' | 'adjustments' | 'log' | 'scrap-verification'>('balance');
   const [newProductName, setNewProductName] = useState('');
@@ -72,13 +73,14 @@ export const Estoque: React.FC = () => {
   const [logFilterEndDate, setLogFilterEndDate] = useState('');
 
   // Helper check for purchases
-  const isPurchaseType = (type: string): boolean => {
+  const isPurchaseType = (type: any): boolean => {
+    if (!type || typeof type !== 'string') return false;
     const cleaned = cleanOccurrenceTypeName(type).toLowerCase().trim();
-    const found = customAvariaTypes.find(t => cleanOccurrenceTypeName(t.type).toLowerCase().trim() === cleaned);
+    const found = (customAvariaTypes || []).find(t => cleanOccurrenceTypeName(t?.type || '').toLowerCase().trim() === cleaned);
     if (found) {
       return found.category === 'compra' || found.category === 'vasilhame_rota';
     }
-    const norm = type.toLowerCase().trim();
+    const norm = (type || '').toLowerCase().trim();
     return norm === 'vasilhame de rota' || norm.startsWith('+') || norm.includes('compra') || norm.includes('são pedro') || norm.includes('sao pedro') || norm.includes('prime') || norm.includes('rota');
   };
 
@@ -207,8 +209,11 @@ export const Estoque: React.FC = () => {
     };
 
     (customStockProducts || []).forEach(p => {
-      const norm = p.toLowerCase().trim();
-      stock[norm] = initial[`${currentUserUnit}_${norm}`] || 0;
+      const pName = typeof p === 'string' ? p : (p?.name || '');
+      const norm = pName.toLowerCase().trim();
+      if (norm) {
+        stock[norm] = initial[`${currentUserUnit}_${norm}`] || 0;
+      }
     });
 
     unitMovements.forEach(m => {
@@ -350,8 +355,9 @@ export const Estoque: React.FC = () => {
 
       const targetAlertProducts = ['vasilhame são pedro', 'vasilhame prime', 'vasilhame de rota'];
       (customStockProducts || []).forEach(p => {
-        const normName = p.toLowerCase().trim();
-        if (!targetAlertProducts.includes(normName)) {
+        const pName = typeof p === 'string' ? p : (p?.name || '');
+        const normName = pName.toLowerCase().trim();
+        if (normName && !targetAlertProducts.includes(normName)) {
           targetAlertProducts.push(normName);
         }
       });
@@ -765,9 +771,12 @@ export const Estoque: React.FC = () => {
       'vasilhame prime': initialStockLevels[`${currentUserUnit}_vasilhame prime`] || 0,
       'vasilhame de rota': initialStockLevels[`${currentUserUnit}_vasilhame de rota`] || 0,
     };
-    customStockProducts.forEach(p => {
-      const norm = p.toLowerCase().trim();
-      list[norm] = initialStockLevels[`${currentUserUnit}_${norm}`] || 0;
+    (customStockProducts || []).forEach(p => {
+      const pName = typeof p === 'string' ? p : (p?.name || '');
+      const norm = pName.toLowerCase().trim();
+      if (norm) {
+        list[norm] = initialStockLevels[`${currentUserUnit}_${norm}`] || 0;
+      }
     });
     setTempInitialLevels(list);
     setShowAdjustInitialModal(true);
@@ -815,6 +824,7 @@ export const Estoque: React.FC = () => {
     if (norm === 'sucata') return 'text-amber-700 bg-amber-50 border-amber-200';
     if (norm === 'vasilhame são pedro') return 'text-blue-700 bg-blue-50 border-blue-200';
     if (norm === 'vasilhame prime') return 'text-emerald-700 bg-emerald-50 border-emerald-200';
+    if (norm === 'vasilhame de rota') return 'text-indigo-700 bg-indigo-50 border-indigo-200';
     return 'text-slate-700 bg-slate-50 border-slate-200';
   };
 
@@ -1015,14 +1025,16 @@ export const Estoque: React.FC = () => {
 
             {/* CUSTOM dynamic Products */}
             {(customStockProducts || []).map(p => {
-              const norm = p.toLowerCase().trim();
+              const pName = typeof p === 'string' ? p : (p?.name || '');
+              const norm = pName.toLowerCase().trim();
+              if (!norm) return null;
               const qty = currentStocks[norm] || 0;
-              const isEditing = editingProductOldName === p;
+              const isEditing = editingProductOldName === pName;
 
               return (
                 <div key={norm} className="bg-white border border-slate-200 rounded-3xl p-5 shadow-xs flex flex-col justify-between relative group min-h-[160px]">
                   {/* Edit/Delete icons at the top right of the card visible on hover (if not editing/deleting) */}
-                  {!isEditing && deletingProductName !== p && currentUser?.role !== 'visualizador' && (
+                  {!isEditing && deletingProductName !== p && !isReadOnly && (
                     <div className="absolute top-4 right-4 flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
                       <button
                         onClick={() => {
@@ -1699,9 +1711,12 @@ export const Estoque: React.FC = () => {
                   <option value="sucata">Sucata</option>
                   <option value="vasilhame são pedro">Vasilhame São Pedro</option>
                   <option value="vasilhame prime">Vasilhame Prime</option>
-                  {customStockProducts.map(p => (
-                    <option key={p} value={p.toLowerCase().trim()}>{p}</option>
-                  ))}
+                  <option value="vasilhame de rota">Vasilhame de Rota</option>
+                  {(customStockProducts || []).map(p => {
+                    const pName = typeof p === 'string' ? p : (p?.name || '');
+                    if (!pName) return null;
+                    return <option key={pName} value={pName.toLowerCase().trim()}>{pName}</option>;
+                  })}
                 </select>
               </div>
 
@@ -1809,18 +1824,18 @@ export const Estoque: React.FC = () => {
                       </td>
                       <td className="py-3 px-3 font-bold whitespace-nowrap">
                         {log.type === 'entrada' ? (
-                          <span className="text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded-md flex items-center gap-0.5 w-fit">
+                          <span className="text-blue-600 bg-blue-50 border border-blue-200 px-1.5 py-0.5 rounded-md flex items-center gap-0.5 w-fit font-bold">
                             <ArrowUpRight size={12} />
                             Entrada
                           </span>
                         ) : (
-                          <span className="text-red-650 bg-red-50 px-1.5 py-0.5 rounded-md flex items-center gap-0.5 w-fit">
+                          <span className="text-red-600 bg-red-50 border border-red-200 px-1.5 py-0.5 rounded-md flex items-center gap-0.5 w-fit font-bold">
                             <ArrowDownRight size={12} />
                             Saída
                           </span>
                         )}
                       </td>
-                      <td className={`py-3 px-3 font-extrabold font-mono text-right ${log.type === 'entrada' ? 'text-emerald-700' : 'text-red-750'}`}>
+                      <td className={`py-3 px-3 font-extrabold font-mono text-right ${log.type === 'entrada' ? 'text-blue-700' : 'text-red-600'}`}>
                         {log.type === 'entrada' ? '+' : '-'}{log.qty} un
                       </td>
                       <td className="py-3 px-3 whitespace-nowrap">
@@ -1985,9 +2000,12 @@ export const Estoque: React.FC = () => {
                   <option value="Sucata">Sucata</option>
                   <option value="Vasilhame São Pedro">Vasilhame São Pedro</option>
                   <option value="Vasilhame Prime">Vasilhame Prime</option>
-                  {customStockProducts.map(p => (
-                    <option key={p} value={p}>{p}</option>
-                  ))}
+                  <option value="Vasilhame de Rota">Vasilhame de Rota</option>
+                  {(customStockProducts || []).map(p => {
+                    const pName = typeof p === 'string' ? p : (p?.name || '');
+                    if (!pName) return null;
+                    return <option key={pName} value={pName}>{pName}</option>;
+                  })}
                 </select>
               </div>
 
@@ -2000,11 +2018,11 @@ export const Estoque: React.FC = () => {
                     onClick={() => setAdjustType('entrada')}
                     className={`p-2.5 rounded-xl border text-xs font-extrabold flex justify-center items-center gap-1.5 transition-all ${
                       adjustType === 'entrada'
-                        ? 'bg-emerald-50 border-emerald-300 text-emerald-800 ring-2 ring-emerald-350'
+                        ? 'bg-blue-50 border-blue-300 text-blue-800 ring-2 ring-blue-300'
                         : 'bg-white border-slate-250 text-slate-500 hover:text-slate-800'
                     }`}
                   >
-                    <ArrowUpRight size={14} />
+                    <ArrowUpRight size={14} className={adjustType === 'entrada' ? 'text-blue-600' : ''} />
                     Entrada (+)
                   </button>
                   <button
@@ -2012,11 +2030,11 @@ export const Estoque: React.FC = () => {
                     onClick={() => setAdjustType('saida')}
                     className={`p-2.5 rounded-xl border text-xs font-extrabold flex justify-center items-center gap-1.5 transition-all ${
                       adjustType === 'saida'
-                        ? 'bg-red-50 border-red-205 text-red-800 ring-2 ring-red-250'
+                        ? 'bg-red-50 border-red-300 text-red-800 ring-2 ring-red-300'
                         : 'bg-white border-slate-250 text-slate-500 hover:text-slate-800'
                     }`}
                   >
-                    <ArrowDownRight size={14} />
+                    <ArrowDownRight size={14} className={adjustType === 'saida' ? 'text-red-600' : ''} />
                     Saída (-)
                   </button>
                 </div>

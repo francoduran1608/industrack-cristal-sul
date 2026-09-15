@@ -1,24 +1,76 @@
 import React, { useState, useEffect } from 'react';
-import { useStore, cleanOccurrenceTypeName } from '../store';
-import { Movement } from '../types';
+import { useStore, cleanOccurrenceTypeName, defaultProductionMachines } from '../store';
+import { Movement, MachineInfo } from '../types';
 import { calculateKanbanForecasts } from '../utils/productionAverage';
-import { Search, FileText, Printer, ArrowLeft, Check, CheckSquare, XCircle, AlertCircle, Info, Download, ExternalLink, X, KanbanSquare, List, Pause, Play, Droplet, Lock, Unlock } from 'lucide-react';
+import { getWorkScheduleStatus } from '../utils/workSchedule';
+import { Search, FileText, Printer, ArrowLeft, Check, CheckSquare, XCircle, AlertCircle, Info, Download, ExternalLink, X, KanbanSquare, List, Pause, Play, Droplet, Lock, Unlock, Wrench, AlertTriangle, Cpu, Clock, ShieldAlert, Layers, Sun, Sunset, Droplets, Gauge } from 'lucide-react';
 import { InlineClientEditor } from '../components/InlineClientEditor';
 import { ProductionControlModal } from '../components/ProductionControlModal';
+import { ProductionStopModal } from '../components/ProductionStopModal';
+import { MachineStatusManagerModal } from '../components/MachineStatusManagerModal';
+import { QuickMachineStopModal } from '../components/QuickMachineStopModal';
+import { MachineStopsReportView } from '../components/MachineStopsReportView';
 
 export const FilaProducao: React.FC = () => {
-  const { movements, updateMovementStatus, updateKanbanStep, toggleProductionOpen, productionOpen, currentUser, customVehicleCategories = [], companyLogo, avgTimeDischarging = 30, avgTimeLoading = 45, registeredVehicles = [], customAvariaTypes = [] } = useStore();
-  const hasWriteAccess = currentUser?.role !== 'visualizador';
-  const isProductionOpen = productionOpen?.[currentUser?.unit || 'matriz'] !== false;
+  const { 
+    movements, 
+    updateMovementStatus, 
+    updateKanbanStep, 
+    toggleProductionOpen, 
+    productionOpen, 
+    productionMachines,
+    productionStatusDetails,
+    setMachineStatus,
+    pauseMachineForLunch,
+    endMachineDay,
+    resumeMachineOperation,
+    resetAllMachines,
+    currentUser, 
+    customVehicleCategories = [], 
+    companyLogo, 
+    avgTimeDischarging = 30, 
+    avgTimeLoading = 45, 
+    registeredVehicles = [], 
+    customAvariaTypes = [] 
+  } = useStore();
+  const targetUnit = currentUser?.unit || 'matriz';
+  const hasWriteAccess = currentUser?.role !== 'visualizador' && currentUser?.role !== 'supervisor';
+
+  // Machine breakdown and single line mode calculations
+  const unitMachines = (productionMachines && productionMachines[targetUnit]) 
+    ? productionMachines[targetUnit] 
+    : (defaultProductionMachines[targetUnit] || defaultProductionMachines.matriz);
+  const machinesList: MachineInfo[] = Object.values(unitMachines);
+  const brokenMachines = machinesList.filter(m => m.status === 'quebrada' || m.status === 'manutencao');
+  const lunchMachines = machinesList.filter(m => m.status === 'pausada_almoco');
+  const closedDayMachines = machinesList.filter(m => m.status === 'encerrada_dia');
+  const allStoppedMachines = machinesList.filter(m => m.status !== 'operacional');
+  const operationalMachines = machinesList.filter(m => m.status === 'operacional');
+  const allMachinesStopped = machinesList.length > 0 && machinesList.every(m => m.status !== 'operacional');
+
+  const isProductionOpen = (productionOpen?.[targetUnit] !== false) && !allMachinesStopped;
   const isReadOnly = !hasWriteAccess || !isProductionOpen;
 
-  const isPurchaseType = (type: string): boolean => {
+  const isSingleLineMode = targetUnit !== 'filial' && machinesList.length >= 2 && brokenMachines.length === 1;
+  const isAllBrokenMode = targetUnit !== 'filial' && machinesList.length >= 2 && brokenMachines.length >= machinesList.length;
+  const activeMachine = operationalMachines[0];
+  const brokenMachine = brokenMachines[0];
+
+  const currentStatusDetail = productionStatusDetails?.[targetUnit];
+  const scheduleStatus = getWorkScheduleStatus(new Date());
+
+  const [showStopModal, setShowStopModal] = useState(false);
+  const [showMachineManagerModal, setShowMachineManagerModal] = useState(false);
+  const [quickStopMachine, setQuickStopMachine] = useState<MachineInfo | null>(null);
+
+  const isPurchaseType = (type: any): boolean => {
+    if (!type || typeof type !== 'string') return false;
     const cleaned = cleanOccurrenceTypeName(type).toLowerCase().trim();
-    const found = customAvariaTypes.find(t => cleanOccurrenceTypeName(t.type).toLowerCase().trim() === cleaned);
+    const found = (customAvariaTypes || []).find(t => cleanOccurrenceTypeName(t?.type || '').toLowerCase().trim() === cleaned);
     if (found) {
       return found.category === 'compra' || found.category === 'vasilhame_rota';
     }
-    const norm = type.toLowerCase().trim();
+    const norm = (type || '').toLowerCase().trim();
     return norm === 'vasilhame de rota' || norm.startsWith('+') || norm.includes('compra') || norm.includes('são pedro') || norm.includes('sao pedro') || norm.includes('prime') || norm.includes('rota');
   };
 
@@ -33,6 +85,7 @@ export const FilaProducao: React.FC = () => {
   // View state
   const [activeTab, setActiveTab] = useState<'lista' | 'kanban'>('lista');
   const [showKanbanReport, setShowKanbanReport] = useState(false);
+  const [showMachineStopsModal, setShowMachineStopsModal] = useState(false);
   const [selectedVehicleForProduction, setSelectedVehicleForProduction] = useState<Movement | null>(null);
   const [productionFocusPhase, setProductionFocusPhase] = useState<'descarregamento' | 'carregamento' | 'all'>('all');
   const [productionTransitionOnSave, setProductionTransitionOnSave] = useState<'aguardando_carregamento' | 'concluido' | null>(null);
@@ -118,6 +171,16 @@ export const FilaProducao: React.FC = () => {
   const isFilial = currentUser?.unit === 'filial';
 
   const queueFilial = movements
+    .filter(m => 
+      m.status !== 'saida' && 
+      m.status !== 'concluido' && 
+      !m.bypassProduction &&
+      (m.unit || 'matriz') === (currentUser?.unit || 'matriz') &&
+      matchesSearch(m)
+    )
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+
+  const queueSingleLine = movements
     .filter(m => 
       m.status !== 'saida' && 
       m.status !== 'concluido' && 
@@ -217,10 +280,18 @@ export const FilaProducao: React.FC = () => {
     { id: 'concluido', label: 'Concluídos', color: 'bg-blue-50 border-blue-200' }
   ] as const;
 
+  const getVehicleMachine = (vehicle: Movement): MachineInfo | undefined => {
+    if (targetUnit === 'filial') return undefined;
+    const line = getLineType(vehicle.vehicleType);
+    const machineId = line === 'pesada' ? 'machine_1' : 'machine_2';
+    return unitMachines[machineId];
+  };
+
   const QueueCard = ({ vehicle }: { vehicle: Movement }) => {
     const isAtendimento = vehicle.kanbanStep && vehicle.kanbanStep !== 'aguardando_descarregamento' && vehicle.kanbanStep !== 'concluido';
     const borderCol = isAtendimento ? 'border-l-emerald-500' : 'border-l-orange-500';
     const bgCol = isAtendimento ? 'bg-emerald-50/30 border-emerald-100' : 'bg-white';
+    const vehicleMachine = getVehicleMachine(vehicle);
     
     let statusLabel = 'NA FILA';
     if (vehicle.kanbanStep) {
@@ -237,17 +308,48 @@ export const FilaProducao: React.FC = () => {
       } else {
         statusLabel += ' (PAUSADO ⏸️)';
       }
+    } else if (vehicle.gateStatus === 'ausente_oficina') {
+      statusLabel += ' (FORA: OFICINA 🔧)';
+    } else if (vehicle.gateStatus === 'ausente_almoco') {
+      statusLabel += ' (FORA: ALMOÇO 🍽️)';
+    } else if (vehicleMachine && vehicleMachine.status !== 'operacional') {
+      if (vehicleMachine.status === 'pausada_almoco') statusLabel += ' (MÁQ. EM ALMOÇO 🍽️)';
+      else if (vehicleMachine.status === 'encerrada_dia') statusLabel += ' (MÁQ. ENCERRADA 🌙)';
+      else if (vehicleMachine.status === 'quebrada') statusLabel += ' (MÁQ. QUEBRADA 🔴)';
+      else if (vehicleMachine.status === 'manutencao') statusLabel += ' (MÁQ. MANUTENÇÃO 🟡)';
     }
 
     return (
       <div id={`queue-card-${vehicle.id}`} className={`p-3 border border-slate-200 border-l-4 ${borderCol} ${bgCol} rounded-xl shadow-xs flex flex-col gap-1 transition-all`}>
         <div className="flex justify-between font-bold text-sm text-slate-800">
-          <span className="font-mono tracking-tight">
-            {vehicle.plate} 
-            <span className="text-[10px] font-normal text-slate-500 uppercase ml-1">({vehicle.ownerType})</span>
-            <span className="text-[10px] font-semibold bg-slate-100 text-slate-600 px-1 py-0.5 rounded uppercase ml-1.5">
+          <span className="font-mono tracking-tight flex flex-wrap items-center gap-1">
+            <span>{vehicle.plate}</span>
+            <span className="text-[10px] font-normal text-slate-500 uppercase">({vehicle.ownerType})</span>
+            <span className="text-[10px] font-semibold bg-slate-100 text-slate-600 px-1 py-0.5 rounded uppercase">
               {customVehicleCategories.find(c => c.id === vehicle.vehicleType)?.name || vehicle.vehicleType}
             </span>
+            {vehicle.gateStatus === 'ausente_oficina' && (
+              <span className="text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200 px-1.5 py-0.5 rounded uppercase inline-flex items-center gap-1 animate-pulse">
+                🔧 NA OFICINA
+              </span>
+            )}
+            {vehicle.gateStatus === 'ausente_almoco' && (
+              <span className="text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200 px-1.5 py-0.5 rounded uppercase inline-flex items-center gap-1 animate-pulse">
+                🍽️ ALMOÇO
+              </span>
+            )}
+            {vehicleMachine && vehicleMachine.status !== 'operacional' && (
+              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded uppercase inline-flex items-center gap-1 ${
+                vehicleMachine.status === 'pausada_almoco' ? 'bg-amber-100 text-amber-900 border border-amber-300' :
+                vehicleMachine.status === 'encerrada_dia' ? 'bg-purple-100 text-purple-900 border border-purple-300' :
+                vehicleMachine.status === 'quebrada' ? 'bg-red-100 text-red-900 border border-red-300' :
+                'bg-yellow-100 text-yellow-900 border border-yellow-300'
+              }`}>
+                {vehicleMachine.status === 'pausada_almoco' ? '🍽️ MÁQ. ALMOÇO' :
+                 vehicleMachine.status === 'encerrada_dia' ? '🌙 MÁQ. ENCERRADA' :
+                 vehicleMachine.status === 'quebrada' ? '🔴 MÁQ. QUEBRADA' : '🟡 MÁQ. MANUTENÇÃO'}
+              </span>
+            )}
           </span>
           <span className="text-xs text-slate-500 font-medium tabular-nums">{new Date(vehicle.timestamp).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}</span>
         </div>
@@ -314,23 +416,126 @@ export const FilaProducao: React.FC = () => {
     );
   };
 
-  const Column = ({ title, subTitle, items, pillClass, borderClass }: { title: string, subTitle: string, items: Movement[], pillClass: string, borderClass: string }) => (
-    <section className="bg-white border border-slate-200 rounded-lg flex flex-col overflow-hidden shadow-sm h-full">
-      <div className="bg-slate-50 px-3 py-2 border-b border-slate-200 flex justify-between items-center shrink-0">
-        <h2 className="text-xs font-bold text-slate-700 uppercase">Linha: {title} <span className="text-[10px] text-slate-500 font-medium normal-case">({subTitle})</span></h2>
-        <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider ${pillClass}`}>{items.length} Veículos</span>
-      </div>
-      <div className="flex-1 p-2 space-y-2 overflow-y-auto bg-slate-100 min-h-[300px]">
-        {items.length === 0 ? (
-          <div className="text-center py-10 text-xs text-slate-400 font-bold uppercase tracking-widest border border-dashed border-slate-300 rounded bg-slate-50/50">
-            Nenhum veículo ativo nesta fila
+  const Column = ({ 
+    title, 
+    subTitle, 
+    items, 
+    pillClass, 
+    borderClass,
+    machine
+  }: { 
+    title: string; 
+    subTitle: string; 
+    items: Movement[]; 
+    pillClass: string; 
+    borderClass: string;
+    machine?: MachineInfo;
+  }) => {
+    const isMachOp = !machine || machine.status === 'operacional';
+    const isMachLunch = machine?.status === 'pausada_almoco';
+    const isMachClosed = machine?.status === 'encerrada_dia';
+    const isMachBroken = machine?.status === 'quebrada';
+    const isMachMaint = machine?.status === 'manutencao';
+
+    return (
+      <section className={`bg-white border rounded-lg flex flex-col overflow-hidden shadow-sm h-full ${!isMachOp ? 'border-amber-300' : 'border-slate-200'}`}>
+        <div className={`px-3 py-2 border-b flex flex-wrap justify-between items-center gap-2 shrink-0 ${
+          isMachLunch ? 'bg-amber-50 border-amber-200' :
+          isMachClosed ? 'bg-purple-50 border-purple-200' :
+          isMachBroken ? 'bg-red-50 border-red-200' :
+          isMachMaint ? 'bg-yellow-50 border-yellow-200' :
+          'bg-slate-50 border-slate-200'
+        }`}>
+          <div className="flex items-center gap-2">
+            <div>
+              <h2 className="text-xs font-bold text-slate-800 uppercase flex items-center gap-1.5">
+                <span>Linha: {title}</span>
+                {machine && (
+                  <span className={`text-[10px] font-black uppercase px-2 py-0.2 rounded-full border ${
+                    isMachOp ? 'bg-emerald-100 text-emerald-800 border-emerald-300' :
+                    isMachLunch ? 'bg-amber-100 text-amber-900 border-amber-300' :
+                    isMachClosed ? 'bg-purple-100 text-purple-900 border-purple-300' :
+                    isMachBroken ? 'bg-red-100 text-red-900 border-red-300' :
+                    'bg-yellow-100 text-yellow-900 border-yellow-300'
+                  }`}>
+                    {isMachOp ? '🟢 Em Operação' : isMachLunch ? '🍽️ Almoço' : isMachClosed ? '🌙 Encerrada' : isMachBroken ? '🔴 Quebrada' : '🟡 Manutenção'}
+                  </span>
+                )}
+              </h2>
+              <span className="text-[10px] text-slate-500 font-medium normal-case block">
+                {subTitle} {machine?.reason && <span className="font-semibold text-slate-700 ml-1">({machine.reason})</span>}
+              </span>
+            </div>
           </div>
-        ) : (
-          items.map(item => <QueueCard key={item.id} vehicle={item} />)
-        )}
-      </div>
-    </section>
-  );
+
+          <div className="flex items-center gap-1.5">
+            {machine && hasWriteAccess && (
+              isMachOp ? (
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => pauseMachineForLunch(machine.id, targetUnit)}
+                    className="px-2 py-1 bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300 rounded text-[10px] font-bold uppercase transition-colors cursor-pointer"
+                    title="Pausar esta máquina para almoço"
+                  >
+                    🍽️ Almoço
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => endMachineDay(machine.id, targetUnit)}
+                    className="px-2 py-1 bg-purple-100 hover:bg-purple-200 text-purple-800 border border-purple-300 rounded text-[10px] font-bold uppercase transition-colors cursor-pointer"
+                    title="Encerrar expediente desta máquina hoje"
+                  >
+                    🌙 Fim do Dia
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setQuickStopMachine(machine)}
+                    className="px-2 py-1 bg-yellow-100 hover:bg-yellow-200 text-yellow-800 border border-yellow-300 rounded text-[10px] font-bold uppercase transition-colors cursor-pointer flex items-center gap-1"
+                    title="Informar se a máquina está quebrada, em manutenção ou outra pausa"
+                  >
+                    <Wrench size={10} /> Parada / Manutenção
+                  </button>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => resumeMachineOperation(machine.id, targetUnit)}
+                    className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 transition-colors cursor-pointer shadow-xs animate-pulse"
+                    title="Retomar operação desta máquina"
+                  >
+                    <Play size={10} fill="currentColor" /> Retomar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setQuickStopMachine(machine)}
+                    className="p-1 bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded text-[10px] transition-colors cursor-pointer"
+                    title="Alterar motivo de parada / manutenção desta máquina"
+                  >
+                    <Wrench size={12} />
+                  </button>
+                </div>
+              )
+            )}
+            <span className={`text-[10px] font-bold px-2 py-0.5 rounded uppercase tracking-wider ${pillClass}`}>
+              {items.length} Veículos
+            </span>
+          </div>
+        </div>
+
+        <div className="flex-1 p-2 space-y-2 overflow-y-auto bg-slate-100 min-h-[300px]">
+          {items.length === 0 ? (
+            <div className="text-center py-10 text-xs text-slate-400 font-bold uppercase tracking-widest border border-dashed border-slate-300 rounded bg-slate-50/50">
+              Nenhum veículo ativo nesta fila
+            </div>
+          ) : (
+            items.map(item => <QueueCard key={item.id} vehicle={item} />)
+          )}
+        </div>
+      </section>
+    );
+  };
 
   // Kanban Data & Components
   const validKanbanMovements = movements
@@ -345,11 +550,13 @@ export const FilaProducao: React.FC = () => {
   const StepTimer = ({ vehicle, currentStepId }: { vehicle: Movement, currentStepId: string }) => {
     const [now, setNow] = useState(Date.now());
     
+    const isAbsent = vehicle.gateStatus === 'ausente_almoco' || vehicle.gateStatus === 'ausente_oficina';
+    
     useEffect(() => {
-      if (vehicle.kanbanStep === 'concluido' || !!vehicle.kanbanPausedAt) return;
+      if (vehicle.kanbanStep === 'concluido' || !!vehicle.kanbanPausedAt || isAbsent) return;
       const interval = setInterval(() => setNow(Date.now()), 1000);
       return () => clearInterval(interval);
-    }, [vehicle.kanbanStep, vehicle.kanbanPausedAt]);
+    }, [vehicle.kanbanStep, vehicle.kanbanPausedAt, isAbsent]);
 
     const timings = vehicle.kanbanTimings || {};
 
@@ -369,23 +576,30 @@ export const FilaProducao: React.FC = () => {
     const start = new Date(startObj).getTime();
     let currentEnd = now;
 
+    const activeExit = (vehicle.gateTemporaryExits || []).find(e => !e.returnedAt);
+
     if (vehicle.kanbanPausedAt) {
       currentEnd = new Date(vehicle.kanbanPausedAt).getTime();
-    } else if (vehicle.kanbanStep !== currentStepId) {
-      // If the vehicle has moved past this step, the time spent here is fixed.
-      // Wait, we only show timer for current step actually, because Kanban cards are shown per step!
-      // So currentEnd is either now or kanbanPausedAt.
+    } else if (activeExit) {
+      currentEnd = new Date(activeExit.exitedAt).getTime();
     }
 
     let diff = Math.max(0, currentEnd - start);
     diff -= (vehicle.kanbanTotalPause?.[currentStepId] || 0);
+    
+    // Subtract finished temporary exits in this step
+    const finishedAbsenceMs = (vehicle.gateTemporaryExits || [])
+      .filter(e => e.returnedAt && (e.step === currentStepId || (!e.step && currentStepId === 'aguardando_descarregamento')))
+      .reduce((sum, e) => sum + (e.durationMs || 0), 0);
+      
+    diff -= finishedAbsenceMs;
     diff = Math.max(0, diff);
 
     const minutes = Math.floor(diff / 60000);
     const seconds = Math.floor((diff % 60000) / 1000);
 
     return (
-      <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded tabular-nums tracking-tighter ${vehicle.kanbanPausedAt ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>
+      <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded tabular-nums tracking-tighter ${(vehicle.kanbanPausedAt || isAbsent) ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500'}`}>
         ⏱ {minutes.toString().padStart(2, '0')}:{seconds.toString().padStart(2, '0')}
       </span>
     );
@@ -420,7 +634,19 @@ export const FilaProducao: React.FC = () => {
           </div>
         )}
         <div className="flex justify-between items-start">
-          <span className="font-bold text-slate-800 tracking-wider font-mono">{vehicle.plate}</span>
+          <span className="font-bold text-slate-800 tracking-wider font-mono flex flex-wrap items-center gap-1">
+            <span>{vehicle.plate}</span>
+            {vehicle.gateStatus === 'ausente_oficina' && (
+              <span className="text-[8px] font-black bg-amber-100 text-amber-800 border border-amber-200 px-1 py-0.2 rounded uppercase inline-flex items-center gap-0.5 animate-pulse">
+                🔧 OFICINA
+              </span>
+            )}
+            {vehicle.gateStatus === 'ausente_almoco' && (
+              <span className="text-[8px] font-black bg-indigo-100 text-indigo-800 border border-indigo-200 px-1 py-0.2 rounded uppercase inline-flex items-center gap-0.5 animate-pulse">
+                🍽️ ALMOÇO
+              </span>
+            )}
+          </span>
           <div className="flex items-center gap-1 font-sans">
              <span className="text-[10px] text-slate-400 tabular-nums">
                {new Date(vehicle.timestamp).toLocaleTimeString('pt-BR', { hour:'2-digit', minute:'2-digit' })}
@@ -488,9 +714,19 @@ export const FilaProducao: React.FC = () => {
               if (!startObj) return <div className="text-slate-400 italic font-medium">Cronômetro não iniciado</div>;
               
               const start = new Date(startObj).getTime();
-              const currentEnd = vehicle.kanbanPausedAt ? new Date(vehicle.kanbanPausedAt).getTime() : Date.now();
+              const activeExit = (vehicle.gateTemporaryExits || []).find(e => !e.returnedAt);
+              const currentEnd = vehicle.kanbanPausedAt 
+                ? new Date(vehicle.kanbanPausedAt).getTime() 
+                : (activeExit ? new Date(activeExit.exitedAt).getTime() : Date.now());
               let diff = Math.max(0, currentEnd - start);
               diff -= (vehicle.kanbanTotalPause?.[currentStepId] || 0);
+              
+              // Subtract finished temporary exits in this step
+              const finishedAbsenceMs = (vehicle.gateTemporaryExits || [])
+                .filter(e => e.returnedAt && (e.step === currentStepId || (!e.step && (currentStepId as string) === 'aguardando_descarregamento')))
+                .reduce((sum, e) => sum + (e.durationMs || 0), 0);
+                
+              diff -= finishedAbsenceMs;
               const elapsedSecs = Math.max(0, Math.floor(diff / 1000));
               
               const over = elapsedSecs > predictedSecs;
@@ -601,6 +837,25 @@ export const FilaProducao: React.FC = () => {
               <Lock size={10} /> Produção Fechada
             </div>
           )}
+
+          {currentStepId !== 'concluido' && isProductionOpen && (() => {
+            const mach = getVehicleMachine(vehicle);
+            if (!mach || mach.status === 'operacional') return null;
+            return (
+              <div className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider border ${
+                mach.status === 'pausada_almoco' ? 'bg-amber-100 text-amber-900 border-amber-300' :
+                mach.status === 'encerrada_dia' ? 'bg-purple-100 text-purple-900 border-purple-300' :
+                mach.status === 'quebrada' ? 'bg-red-100 text-red-900 border-red-300' :
+                'bg-yellow-100 text-yellow-900 border-yellow-300'
+              }`}>
+                <span>
+                  {mach.status === 'pausada_almoco' ? '🍽️ Máq. Almoço' :
+                   mach.status === 'encerrada_dia' ? '🌙 Máq. Encerrada' :
+                   mach.status === 'quebrada' ? '🔴 Máq. Quebrada' : '🟡 Máq. Manutenção'}
+                </span>
+              </div>
+            );
+          })()}
           
           {(() => {
             const currentStepIdx = K_STEPS.findIndex(s => s.id === currentStepId);
@@ -635,17 +890,25 @@ export const FilaProducao: React.FC = () => {
               }
             };
 
+            const isVehicleAbsent = vehicle.gateStatus === 'ausente_oficina' || vehicle.gateStatus === 'ausente_almoco';
+            const vehicleMach = getVehicleMachine(vehicle);
+            const isMachInactive = vehicleMach && vehicleMach.status !== 'operacional';
+
             return (
               <button
                 onClick={handleStepTransition}
-                disabled={isPaused || isReadOnly}
+                disabled={isPaused || isReadOnly || isVehicleAbsent || isMachInactive}
                 className={`flex-1 text-[10px] uppercase font-bold py-1.5 px-2 rounded tracking-wider transition-all ${
-                  isPaused || isReadOnly 
+                  isPaused || isReadOnly || isVehicleAbsent || isMachInactive
                     ? 'bg-slate-100 text-slate-400 cursor-not-allowed opacity-60' 
                     : 'bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100'
                 }`}
+                title={
+                  isVehicleAbsent ? "Veículo fora (oficina ou almoço) - Não está no pátio" :
+                  isMachInactive ? `Máquina ${vehicleMach?.name} pausada/inoperante` : ""
+                }
               >
-                Próxima Etapa →
+                {isVehicleAbsent ? 'Fora do Pátio 🚫' : isMachInactive ? 'Máquina Pausada ⏸️' : 'Próxima Etapa →'}
               </button>
             );
           })()}
@@ -707,6 +970,21 @@ export const FilaProducao: React.FC = () => {
       if (!start || !end) return null;
       let diff = new Date(end).getTime() - new Date(start).getTime();
       diff -= (pauses[s.id] || 0);
+
+      // Subtract temporary exits for this step
+      const stepAbsenceMs = (m.gateTemporaryExits || [])
+        .filter(e => e.step === s.id || (!e.step && s.id === 'aguardando_descarregamento'))
+        .reduce((sum, e) => {
+          if (e.durationMs) return sum + e.durationMs;
+          const exitTime = new Date(e.exitedAt).getTime();
+          const stepEndTime = new Date(end).getTime();
+          if (exitTime < stepEndTime) {
+            return sum + (stepEndTime - exitTime);
+          }
+          return sum;
+        }, 0);
+      diff -= stepAbsenceMs;
+
       return Math.max(0, Math.floor(diff / 1000));
     });
 
@@ -725,6 +1003,19 @@ export const FilaProducao: React.FC = () => {
       if (overallStart && overallEnd) {
         let diff = new Date(overallEnd).getTime() - new Date(overallStart).getTime();
         Object.values(pauses).forEach(p => diff -= p);
+
+        // Subtract all temporary exits durations
+        const totalAbsenceMs = (m.gateTemporaryExits || []).reduce((sum, e) => {
+          if (e.durationMs) return sum + e.durationMs;
+          const exitTime = new Date(e.exitedAt).getTime();
+          const overallEndTime = new Date(overallEnd).getTime();
+          if (exitTime < overallEndTime) {
+            return sum + (overallEndTime - exitTime);
+          }
+          return sum;
+        }, 0);
+        diff -= totalAbsenceMs;
+
         totalSec = Math.max(0, Math.floor(diff / 1000));
       }
     }
@@ -782,6 +1073,7 @@ export const FilaProducao: React.FC = () => {
         'Formula Descarregamento',
         'Qtd Descarregada',
         'Total Avarias',
+        'Total Avarias de Troca',
         'Total Carregado Final',
         'Observações Produção'
       ];
@@ -794,8 +1086,13 @@ export const FilaProducao: React.FC = () => {
         
         const p = m.productionControl;
         const totalAvarias = p ? (
-          p.avariasDescarregamento.filter(a => !isPurchaseType(a.type)).reduce((sum, item) => sum + item.qty, 0) +
-          p.avariasCarregamento.filter(c => !isPurchaseType(c.type)).reduce((sum, item) => sum + item.qty, 0)
+          p.avariasDescarregamento.filter(a => !isPurchaseType(a.type) && !a.type.toLowerCase().includes('troca')).reduce((sum, item) => sum + item.qty, 0) +
+          p.avariasCarregamento.filter(c => !isPurchaseType(c.type) && !c.type.toLowerCase().includes('troca')).reduce((sum, item) => sum + item.qty, 0)
+        ) : 0;
+        
+        const totalTroca = p ? (
+          p.avariasDescarregamento.filter(a => !isPurchaseType(a.type) && a.type.toLowerCase().includes('troca')).reduce((sum, item) => sum + item.qty, 0) +
+          p.avariasCarregamento.filter(c => !isPurchaseType(c.type) && c.type.toLowerCase().includes('troca')).reduce((sum, item) => sum + item.qty, 0)
         ) : 0;
 
         csvRows.push([
@@ -807,6 +1104,7 @@ export const FilaProducao: React.FC = () => {
           p?.descarregadoFormula || '',
           p?.descarregadoQty !== undefined ? p.descarregadoQty : '-',
           totalAvarias,
+          totalTroca,
           p?.totalCarregado !== undefined ? (p.totalCarregado + (p.retornoVasilhameCheio || 0)) : '-',
           p?.observacoes || ''
         ]);
@@ -892,6 +1190,98 @@ export const FilaProducao: React.FC = () => {
                 Limpar Filtros
               </button>
             </div>
+
+            {/* Envasamento & Produção Breakdown Section */}
+            {(() => {
+              let totalEnvasado = 0;
+              let totalManha = 0;
+              let totalTarde = 0;
+              let m1Manha = 0;
+              let m1Tarde = 0;
+              let m2Manha = 0;
+              let m2Tarde = 0;
+
+              closedMovements.forEach(m => {
+                const qty = (m.productionControl?.totalCarregado || 0) + (m.productionControl?.retornoVasilhameCheio || 0);
+                totalEnvasado += qty;
+
+                const ts = (m.productionControl as any)?.carregamentoFinishedAt || (m.productionControl as any)?.finishedAt || m.exitTimestamp || m.entryTimestamp || m.timestamp;
+                const hour = ts ? new Date(ts).getHours() : 0;
+                const isManha = hour < 12;
+
+                const isPesada = ['carreta', 'truck'].includes((m.vehicleType || '').toLowerCase().trim());
+                if (isManha) {
+                  totalManha += qty;
+                  if (isPesada) m1Manha += qty;
+                  else m2Manha += qty;
+                } else {
+                  totalTarde += qty;
+                  if (isPesada) m1Tarde += qty;
+                  else m2Tarde += qty;
+                }
+              });
+
+              const m1Total = m1Manha + m1Tarde;
+              const m2Total = m2Manha + m2Tarde;
+
+              return (
+                <div className="bg-gradient-to-r from-slate-900 to-blue-950 p-4 rounded-xl text-white shadow-sm border border-slate-800 space-y-3 font-sans">
+                  <div className="flex items-center justify-between border-b border-slate-700/60 pb-2">
+                    <div className="flex items-center gap-2">
+                      <Droplets size={16} className="text-blue-400" />
+                      <h3 className="text-xs font-black uppercase tracking-wider text-white">
+                        Resumo de Água Envasada & Produção por Expediente e Máquina
+                      </h3>
+                    </div>
+                    <span className="text-[10px] font-mono text-blue-300 font-bold bg-blue-900/50 px-2 py-0.5 rounded border border-blue-700/40">
+                      Total: {totalEnvasado.toLocaleString('pt-BR')} u
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
+                    <div className="bg-slate-800/80 p-2.5 rounded-lg border border-slate-700">
+                      <span className="text-[9px] uppercase font-bold text-amber-300 block mb-0.5 flex items-center gap-1">
+                        <Sun size={11} /> ☀️ Manhã (07h-12h)
+                      </span>
+                      <span className="text-lg font-black font-mono text-white">{totalManha.toLocaleString('pt-BR')} u</span>
+                      <span className="text-[8px] text-slate-400 block mt-0.5">
+                        {totalEnvasado > 0 ? `${((totalManha / totalEnvasado) * 100).toFixed(1)}% do total` : '0%'}
+                      </span>
+                    </div>
+
+                    <div className="bg-slate-800/80 p-2.5 rounded-lg border border-slate-700">
+                      <span className="text-[9px] uppercase font-bold text-indigo-300 block mb-0.5 flex items-center gap-1">
+                        <Sunset size={11} /> ⛅ Tarde (12h-18h+)
+                      </span>
+                      <span className="text-lg font-black font-mono text-white">{totalTarde.toLocaleString('pt-BR')} u</span>
+                      <span className="text-[8px] text-slate-400 block mt-0.5">
+                        {totalEnvasado > 0 ? `${((totalTarde / totalEnvasado) * 100).toFixed(1)}% do total` : '0%'}
+                      </span>
+                    </div>
+
+                    <div className="bg-slate-800/80 p-2.5 rounded-lg border border-slate-700">
+                      <span className="text-[9px] uppercase font-bold text-blue-300 block mb-0.5">
+                        🏭 Máquina 1 (Pesada)
+                      </span>
+                      <span className="text-lg font-black font-mono text-white">{m1Total.toLocaleString('pt-BR')} u</span>
+                      <span className="text-[8px] text-slate-400 block mt-0.5">
+                        Manhã: {m1Manha}u | Tarde: {m1Tarde}u
+                      </span>
+                    </div>
+
+                    <div className="bg-slate-800/80 p-2.5 rounded-lg border border-slate-700">
+                      <span className="text-[9px] uppercase font-bold text-emerald-300 block mb-0.5">
+                        🚚 Máquina 2 (Média)
+                      </span>
+                      <span className="text-lg font-black font-mono text-white">{m2Total.toLocaleString('pt-BR')} u</span>
+                      <span className="text-[8px] text-slate-400 block mt-0.5">
+                        Manhã: {m2Manha}u | Tarde: {m2Tarde}u
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Averages Section */}
             <div className="space-y-3 font-sans">
@@ -1009,8 +1399,8 @@ export const FilaProducao: React.FC = () => {
                              <td className="p-3 text-right font-semibold text-red-650 tabular-nums">
                                <div className="flex items-center justify-end gap-1">
                                  <span>{m.productionControl ? (
-                                   m.productionControl.avariasDescarregamento.filter(a => !isPurchaseType(a.type)).reduce((sum, item) => sum + item.qty, 0) +
-                                   m.productionControl.avariasCarregamento.filter(c => !isPurchaseType(c.type)).reduce((sum, item) => sum + item.qty, 0)
+                                   m.productionControl.avariasDescarregamento.filter(a => !isPurchaseType(a.type) && !a.type.toLowerCase().includes('troca')).reduce((sum, item) => sum + item.qty, 0) +
+                                   m.productionControl.avariasCarregamento.filter(c => !isPurchaseType(c.type) && !c.type.toLowerCase().includes('troca')).reduce((sum, item) => sum + item.qty, 0)
                                  ) : '-'}</span>
                                  {m.productionControl && (
                                    m.productionControl.avariasDescarregamentoPhoto || 
@@ -1173,7 +1563,7 @@ export const FilaProducao: React.FC = () => {
             <div className="flex justify-between items-start border-b-2 border-slate-900 pb-4">
               <div className="flex gap-4 items-center">
                 {companyLogo && (
-                  <img src={companyLogo} alt="Logo" className="max-h-12 max-w-[120px] object-contain rounded-md border border-slate-100 p-0.5 bg-white" referrerPolicy="no-referrer" />
+                  <img src={companyLogo || undefined} alt="Logo" className="max-h-12 max-w-[120px] object-contain rounded-md border border-slate-100 p-0.5 bg-white" referrerPolicy="no-referrer" />
                 )}
                 <div className="space-y-1">
                   <span className="text-[10px] font-black uppercase text-blue-600 tracking-widest">Relatório Técnico</span>
@@ -1526,7 +1916,7 @@ export const FilaProducao: React.FC = () => {
             <div className="flex justify-between items-start border-b-2 border-slate-900 pb-4">
               <div className="flex gap-4 items-center">
                 {companyLogo && (
-                  <img src={companyLogo} alt="Logo" className="max-h-12 max-w-[120px] object-contain rounded-md border border-slate-100 p-0.5 bg-white" referrerPolicy="no-referrer" />
+                  <img src={companyLogo || undefined} alt="Logo" className="max-h-12 max-w-[120px] object-contain rounded-md border border-slate-100 p-0.5 bg-white" referrerPolicy="no-referrer" />
                 )}
                 <div className="space-y-1">
                   <span className="text-[10px] font-black uppercase text-blue-600 tracking-widest">Relatório Técnico</span>
@@ -1675,8 +2065,8 @@ export const FilaProducao: React.FC = () => {
     <div className="h-full flex flex-col w-full gap-4">
       
       {/* Top action and filter bar */}
-      <div className="bg-white px-4 py-3 border border-slate-200 rounded-lg shadow-sm flex flex-col sm:flex-row justify-between items-center gap-3 shrink-0">
-        <div className="flex items-center gap-2">
+      <div className="bg-white px-4 py-3 border border-slate-200 rounded-lg shadow-sm flex flex-col lg:flex-row justify-between items-stretch lg:items-center gap-3 shrink-0">
+        <div className="flex flex-wrap items-center gap-2">
           {/* Filter Plates */}
           <div className="relative">
             <span className="absolute inset-y-0 left-0 flex items-center pl-2.5 text-slate-400 pointer-events-none">
@@ -1687,7 +2077,7 @@ export const FilaProducao: React.FC = () => {
               placeholder="Filtrar por Placa..."
               value={searchPlate}
               onChange={e => setSearchPlate(e.target.value)}
-              className="bg-slate-50 text-xs border border-slate-200 p-1.5 pl-8 rounded font-mono outline-none focus:border-blue-400 focus:bg-white shadow-inner max-w-[150px]"
+              className="bg-slate-50 text-xs border border-slate-200 p-1.5 pl-8 rounded font-mono outline-none focus:border-blue-400 focus:bg-white shadow-inner max-w-[140px]"
             />
           </div>
 
@@ -1701,60 +2091,185 @@ export const FilaProducao: React.FC = () => {
               placeholder="Filtrar por Motorista..."
               value={searchDriver}
               onChange={e => setSearchDriver(e.target.value)}
-              className="bg-slate-50 text-xs border border-slate-200 p-1.5 pl-8 rounded outline-none focus:border-blue-400 focus:bg-white shadow-inner max-w-[160px]"
+              className="bg-slate-50 text-xs border border-slate-200 p-1.5 pl-8 rounded outline-none focus:border-blue-400 focus:bg-white shadow-inner max-w-[150px]"
             />
+          </div>
+
+          {/* Work Schedule Badge */}
+          <div className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[11px] font-bold border ${
+            scheduleStatus.isScheduledPause 
+              ? 'bg-blue-50 text-blue-700 border-blue-200' 
+              : scheduleStatus.isOvertime 
+                ? 'bg-purple-50 text-purple-700 border-purple-200'
+                : scheduleStatus.isWithinWorkHours 
+                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200' 
+                  : 'bg-amber-50 text-amber-700 border-amber-200'
+          }`} title={scheduleStatus.currentPeriodName}>
+            <Clock size={13} className="shrink-0" />
+            <span>
+              {scheduleStatus.dayName.slice(0, 3)} {scheduleStatus.formattedCurrentTime}: {scheduleStatus.currentPeriodName}
+            </span>
           </div>
         </div>
 
-        {/* Action Button to trigger official report mode */}
-        <div className="flex items-center gap-2">
-          {hasWriteAccess && activeTab === 'kanban' && (
+        {/* Action Buttons */}
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {/* Machine Status Manager Button */}
+          <button
+            type="button"
+            onClick={() => setShowMachineManagerModal(true)}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-md border transition-all cursor-pointer ${
+              allStoppedMachines.length > 0
+                ? 'bg-amber-50 text-amber-800 border-amber-300 hover:bg-amber-100 animate-pulse'
+                : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100'
+            }`}
+            title="Gerenciar status e pausas de cada máquina (Almoço, Fim de Expediente, Quebras)"
+          >
+            <Cpu size={14} className={allStoppedMachines.length > 0 ? 'text-amber-600' : 'text-slate-500'} />
+            <span>Máquinas ({operationalMachines.length}/{machinesList.length} Op)</span>
+            {lunchMachines.length > 0 && (
+              <span className="bg-amber-500 text-white text-[9px] font-black px-1.5 rounded-full">
+                {lunchMachines.length} Almoço
+              </span>
+            )}
+            {closedDayMachines.length > 0 && (
+              <span className="bg-purple-600 text-white text-[9px] font-black px-1.5 rounded-full">
+                {closedDayMachines.length} Encerrada
+              </span>
+            )}
+            {brokenMachines.length > 0 && (
+              <span className="bg-red-500 text-white text-[9px] font-black px-1.5 rounded-full">
+                {brokenMachines.length} Parada
+              </span>
+            )}
+          </button>
+
+          {/* Production Toggle */}
+          {hasWriteAccess && (
             <div className="flex bg-slate-100 p-1 rounded-md border border-slate-200">
               {isProductionOpen ? (
                 <button
-                  onClick={() => toggleProductionOpen(false, currentUser?.unit)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded text-red-700 hover:bg-white hover:shadow-sm transition-all"
-                  title="Fechar Produção"
+                  type="button"
+                  onClick={() => setShowStopModal(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded text-red-700 hover:bg-white hover:shadow-sm transition-all cursor-pointer"
+                  title="Fechar / Pausar Produção"
                 >
                   <Lock size={14} /> Fechar Produção
                 </button>
               ) : (
                 <button
-                  onClick={() => toggleProductionOpen(true, currentUser?.unit)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded text-emerald-700 hover:bg-white hover:shadow-sm transition-all animate-pulse"
-                  title="Abrir Produção"
+                  type="button"
+                  onClick={() => toggleProductionOpen(true, targetUnit)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded text-emerald-700 hover:bg-white hover:shadow-sm transition-all animate-pulse cursor-pointer"
+                  title="Abrir / Retomar Produção"
                 >
-                  <Unlock size={14} /> Abrir Produção
+                  <Unlock size={14} /> Retomar Produção
                 </button>
               )}
             </div>
           )}
+
+          {/* View Tab selector */}
           <div className="flex bg-slate-100 p-1 rounded-md border border-slate-200">
             <button
+              type="button"
               onClick={() => setActiveTab('lista')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded ${activeTab === 'lista' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded cursor-pointer ${activeTab === 'lista' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
             >
               <List size={14} /> Fila
             </button>
             <button
+              type="button"
               onClick={() => setActiveTab('kanban')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded ${activeTab === 'kanban' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded cursor-pointer ${activeTab === 'kanban' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
             >
               <KanbanSquare size={14} /> Produção
             </button>
           </div>
+
           <button 
+            type="button"
+            onClick={() => setShowMachineStopsModal(true)}
+            className="bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs uppercase tracking-wider px-3.5 py-2 rounded-md flex items-center gap-1.5 shadow-sm shadow-amber-100 transition-colors cursor-pointer"
+            title="Relatório de Paradas & Ociosidade de Máquinas"
+          >
+            <Wrench size={14} /> Relatório Paradas
+          </button>
+
+          <button 
+            type="button"
             onClick={() => activeTab === 'kanban' ? setShowKanbanReport(true) : setReportMode(true)}
-            className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs uppercase tracking-wider px-4 py-2 rounded flex items-center gap-1.5 shadow-sm shadow-blue-100 transition-colors w-full sm:w-auto justify-center"
+            className="bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs uppercase tracking-wider px-3.5 py-2 rounded-md flex items-center gap-1.5 shadow-sm shadow-blue-100 transition-colors cursor-pointer"
           >
             <FileText size={15} /> {activeTab === 'kanban' ? 'Relatório Tempos' : 'Relatório (PDF)'}
           </button>
         </div>
       </div>
 
+      {/* Production Closed Banner */}
+      {!isProductionOpen && (
+        <div className="bg-red-500/10 border-2 border-red-500/30 rounded-xl p-3.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-red-950 animate-in fade-in">
+          <div className="flex items-start gap-3">
+            <ShieldAlert className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-black text-xs uppercase tracking-wider text-red-800 flex flex-wrap items-center gap-2">
+                <span>🛑 Produção Fechada / Pausada</span>
+                {currentStatusDetail?.isScheduledPause && (
+                  <span className="bg-blue-100 text-blue-700 text-[10px] font-bold px-2 py-0.2 rounded-full">
+                    Pausa Programada de Almoço
+                  </span>
+                )}
+              </div>
+              <div className="text-xs text-slate-700 font-medium mt-0.5">
+                <strong>Motivo:</strong> {currentStatusDetail?.customReason || currentStatusDetail?.reason || 'Produção Fechada'}
+                {currentStatusDetail?.closedBy && ` | Responsável: ${currentStatusDetail.closedBy}`}
+                {currentStatusDetail?.closedAt && ` | Início: ${new Date(currentStatusDetail.closedAt).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}`}
+                {currentStatusDetail?.notes && <span className="italic ml-1">({currentStatusDetail.notes})</span>}
+              </div>
+            </div>
+          </div>
+          {hasWriteAccess && (
+            <button
+              type="button"
+              onClick={() => toggleProductionOpen(true, targetUnit)}
+              className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 shadow-sm transition-all cursor-pointer shrink-0 animate-pulse"
+            >
+              <Unlock size={14} /> Retomar Produção
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Single Line Breakdown Banner */}
+      {isSingleLineMode && (
+        <div className="bg-amber-500/10 border-2 border-amber-500/30 rounded-xl p-3.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-amber-950 animate-in fade-in">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+            <div>
+              <div className="font-black text-xs uppercase tracking-wider text-amber-800 flex flex-wrap items-center gap-2">
+                <span>⚠️ Modo Linha Única Ativo: Máquina Parada</span>
+                <span className="bg-red-100 text-red-800 text-[10px] font-bold px-2 py-0.2 rounded-full border border-red-200">
+                  {brokenMachine?.name} ({brokenMachine?.status === 'quebrada' ? 'Quebrada' : 'Manutenção'})
+                </span>
+              </div>
+              <p className="text-xs text-slate-700 font-medium mt-0.5">
+                Como uma das máquinas está inoperante ({brokenMachine?.reason || 'Parada técnica'}), a fábrica está operando em <strong>Linha Única</strong>. Toda a fila de veículos pesados e médios foi consolidada e está sendo processada pela <strong>{activeMachine?.name}</strong>.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowMachineManagerModal(true)}
+            className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-bold uppercase tracking-wider flex items-center gap-1.5 transition-colors cursor-pointer shrink-0"
+          >
+            <Wrench size={13} /> Gerenciar Máquinas
+          </button>
+        </div>
+      )}
+
       {activeTab === 'lista' ? (
         /* Main Grid Queue Columns */
-        <div className={`grid grid-cols-1 ${isFilial ? 'max-w-3xl' : 'md:grid-cols-2 max-w-5xl'} gap-4 flex-1 min-h-0 w-full mx-auto`}>
+        <div className={`grid grid-cols-1 ${isFilial || isSingleLineMode ? 'max-w-3xl' : 'md:grid-cols-2 max-w-5xl'} gap-4 flex-1 min-h-0 w-full mx-auto`}>
           {isFilial ? (
             <div className="md:col-span-2 h-full">
               <Column 
@@ -1765,21 +2280,34 @@ export const FilaProducao: React.FC = () => {
                 borderClass="border-l-indigo-600"
               />
             </div>
+          ) : isSingleLineMode ? (
+            <div className="md:col-span-2 h-full">
+              <Column 
+                title={`FILA ÚNICA (MÁQUINA ATIVA: ${activeMachine?.name || 'MÁQUINA 1'})`} 
+                subTitle={`Modo Linha Única Emergencial (${brokenMachine?.name} Inoperante)`} 
+                items={queueSingleLine} 
+                pillClass="bg-amber-100 text-amber-900 font-extrabold border border-amber-300"
+                borderClass="border-l-amber-600"
+                machine={activeMachine}
+              />
+            </div>
           ) : (
             <>
               <Column 
-                title="PESADA" 
+                title="PESADA (MÁQUINA 1)" 
                 subTitle="Carreta / Truck" 
                 items={queuePesada} 
                 pillClass="bg-red-100 text-red-700"
                 borderClass="border-l-red-500"
+                machine={unitMachines.machine_1}
               />
               <Column 
-                title="MÉDIA" 
+                title="MÉDIA (MÁQUINA 2)" 
                 subTitle="Toco / 3/4" 
                 items={queueMedia} 
                 pillClass="bg-blue-100 text-blue-700"
                 borderClass="border-l-slate-400"
+                machine={unitMachines.machine_2}
               />
             </>
           )}
@@ -1800,6 +2328,61 @@ export const FilaProducao: React.FC = () => {
           focusPhase={productionFocusPhase}
           transitionOnSave={productionTransitionOnSave}
         />
+      )}
+
+      {/* Production Stop Modal */}
+      <ProductionStopModal 
+        isOpen={showStopModal} 
+        onClose={() => setShowStopModal(false)} 
+        unit={targetUnit} 
+      />
+
+      {/* Machine Status Manager Modal */}
+      <MachineStatusManagerModal 
+        isOpen={showMachineManagerModal} 
+        onClose={() => setShowMachineManagerModal(false)} 
+        unit={targetUnit} 
+      />
+
+      {/* Quick Machine Stop Modal (from wrench tag) */}
+      <QuickMachineStopModal
+        isOpen={!!quickStopMachine}
+        onClose={() => setQuickStopMachine(null)}
+        machine={quickStopMachine}
+        unit={targetUnit}
+      />
+
+      {/* Machine Stops & Downtime Report Modal */}
+      {showMachineStopsModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-sm flex items-center justify-center p-3 md:p-6 overflow-y-auto animate-in fade-in">
+          <div className="bg-white rounded-2xl max-w-6xl w-full max-h-[92vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="bg-slate-900 text-white px-5 py-3.5 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 bg-amber-500/20 text-amber-400 rounded-lg border border-amber-400/30">
+                  <Wrench size={18} />
+                </div>
+                <div>
+                  <h3 className="text-sm font-black uppercase tracking-wider text-white">
+                    Relatório de Paradas & Ociosidade de Máquinas
+                  </h3>
+                  <span className="text-[10px] text-slate-300 font-mono">
+                    Unidade: {targetUnit.toUpperCase()} • Análise de Perdas de Produção
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowMachineStopsModal(false)}
+                className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors cursor-pointer"
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <div className="p-4 md:p-6 overflow-y-auto flex-1 bg-slate-50/50">
+              <MachineStopsReportView initialUnit={targetUnit} isStandalone={true} />
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

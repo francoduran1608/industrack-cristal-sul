@@ -45,6 +45,20 @@ export function calculateRealAverages(movements: Movement[], unit?: 'matriz' | '
     if (dischargeStart && dischargeEnd && dischargeQty > 0) {
       let diffMs = new Date(dischargeEnd).getTime() - new Date(dischargeStart).getTime();
       diffMs -= (pauses['descarregamento'] || 0);
+      
+      const stepAbsenceMs = (m.gateTemporaryExits || [])
+        .filter(e => e.step === 'descarregamento')
+        .reduce((sum, e) => {
+          if (e.durationMs) return sum + e.durationMs;
+          const exitTime = new Date(e.exitedAt).getTime();
+          const stepEndTime = new Date(dischargeEnd).getTime();
+          if (exitTime < stepEndTime) {
+            return sum + (stepEndTime - exitTime);
+          }
+          return sum;
+        }, 0);
+      diffMs -= stepAbsenceMs;
+      
       const secs = Math.max(0, Math.floor(diffMs / 1000));
       
       totalDischargingSecs += secs;
@@ -60,6 +74,20 @@ export function calculateRealAverages(movements: Movement[], unit?: 'matriz' | '
     if (loadStart && loadEnd && loadQty > 0) {
       let diffMs = new Date(loadEnd).getTime() - new Date(loadStart).getTime();
       diffMs -= (pauses['carregamento'] || 0);
+      
+      const stepAbsenceMs = (m.gateTemporaryExits || [])
+        .filter(e => e.step === 'carregamento')
+        .reduce((sum, e) => {
+          if (e.durationMs) return sum + e.durationMs;
+          const exitTime = new Date(e.exitedAt).getTime();
+          const stepEndTime = new Date(loadEnd).getTime();
+          if (exitTime < stepEndTime) {
+            return sum + (stepEndTime - exitTime);
+          }
+          return sum;
+        }, 0);
+      diffMs -= stepAbsenceMs;
+      
       const secs = Math.max(0, Math.floor(diffMs / 1000));
 
       totalLoadingSecs += secs;
@@ -149,9 +177,20 @@ export function calculateKanbanForecasts(
     if (!startObj) return 0;
     
     const start = new Date(startObj).getTime();
-    const currentEnd = m.kanbanPausedAt ? new Date(m.kanbanPausedAt).getTime() : Date.now();
+    const activeExit = (m.gateTemporaryExits || []).find(e => !e.returnedAt);
+    const currentEnd = m.kanbanPausedAt 
+      ? new Date(m.kanbanPausedAt).getTime() 
+      : (activeExit ? new Date(activeExit.exitedAt).getTime() : Date.now());
+      
     let diff = Math.max(0, currentEnd - start);
     diff -= (m.kanbanTotalPause?.[stepId] || 0);
+    
+    // Subtract finished temporary exits in this step
+    const finishedAbsenceMs = (m.gateTemporaryExits || [])
+      .filter(e => e.returnedAt && (e.step === stepId || (!e.step && stepId === 'aguardando_descarregamento')))
+      .reduce((sum, e) => sum + (e.durationMs || 0), 0);
+      
+    diff -= finishedAbsenceMs;
     return Math.max(0, Math.floor(diff / 1000));
   };
 

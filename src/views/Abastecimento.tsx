@@ -23,23 +23,27 @@ export const Abastecimento: React.FC = () => {
     updateMovementDetails
   } = useStore();
   
+  const isReadOnly = currentUser?.role === 'visualizador' || currentUser?.role === 'supervisor';
+  
   // Requirement: Posto interno operates exclusively for own company fleet ('proprio')
-  const alreadyFueledMovementIds = new Set(supplies.map(s => s.movementId));
+  const alreadyFueledMovementIds = React.useMemo(() => new Set(supplies.map(s => s.movementId)), [supplies]);
+
+  const currentUserUnit = currentUser?.unit || 'matriz';
 
   // Eligible own-fleet vehicles in yard that have NOT been fueled yet during this entry
-  const eligibleVehicles = movements.filter(
-    m => m.status !== 'saida' && m.ownerType === 'proprio' && !alreadyFueledMovementIds.has(m.id) && (m.unit || 'matriz') === (currentUser?.unit || 'matriz')
-  );
+  const eligibleVehicles = React.useMemo(() => movements.filter(
+    m => m.status !== 'saida' && m.ownerType === 'proprio' && !alreadyFueledMovementIds.has(m.id) && (m.unit || 'matriz') === currentUserUnit
+  ), [movements, alreadyFueledMovementIds, currentUserUnit]);
 
   // Own-fleet vehicles currently in the yard that ALREADY fueled
-  const alreadyFueledActiveVehicles = movements.filter(
-    m => m.status !== 'saida' && m.ownerType === 'proprio' && alreadyFueledMovementIds.has(m.id) && (m.unit || 'matriz') === (currentUser?.unit || 'matriz')
-  );
+  const alreadyFueledActiveVehicles = React.useMemo(() => movements.filter(
+    m => m.status !== 'saida' && m.ownerType === 'proprio' && alreadyFueledMovementIds.has(m.id) && (m.unit || 'matriz') === currentUserUnit
+  ), [movements, alreadyFueledMovementIds, currentUserUnit]);
 
   // All own-fleet vehicles currently in the yard (for checklist management)
-  const yardProprioMovements = movements.filter(
-    m => m.status !== 'saida' && m.ownerType === 'proprio' && (m.unit || 'matriz') === (currentUser?.unit || 'matriz')
-  );
+  const yardProprioMovements = React.useMemo(() => movements.filter(
+    m => m.status !== 'saida' && m.ownerType === 'proprio' && (m.unit || 'matriz') === currentUserUnit
+  ), [movements, currentUserUnit]);
 
   // Fueling form states
   const [vehicleId, setVehicleId] = useState('');

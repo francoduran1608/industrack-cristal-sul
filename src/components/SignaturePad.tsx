@@ -16,22 +16,62 @@ export const SignaturePad: React.FC<SignaturePadProps> = ({ onSign, width = '100
   useEffect(() => {
     const canvas = canvasRef.current;
     const container = containerRef.current;
-    if (canvas && container) {
-      // Set actual canvas size to match container for crisp drawing
-      const rect = container.getBoundingClientRect();
-      canvas.width = rect.width;
-      canvas.height = rect.height;
-      
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.fillStyle = 'white';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.lineWidth = 3;
-        ctx.lineCap = 'round';
-        ctx.lineJoin = 'round';
-        ctx.strokeStyle = '#0f172a'; // slate-900
+    if (!canvas || !container) return;
+
+    const resizeObserver = new ResizeObserver((entries) => {
+      for (let entry of entries) {
+        // Use the bounding box width/height or contentRect
+        const rect = container.getBoundingClientRect();
+        const newWidth = rect.width;
+        const newHeight = rect.height;
+
+        if (newWidth <= 0 || newHeight <= 0) continue;
+
+        // Save existing canvas image if drawing already started
+        const tempCanvas = document.createElement('canvas');
+        tempCanvas.width = canvas.width;
+        tempCanvas.height = canvas.height;
+        const tempCtx = tempCanvas.getContext('2d');
+        const hasContent = canvas.width > 0 && canvas.height > 0;
+        if (tempCtx && hasContent) {
+          try {
+            tempCtx.drawImage(canvas, 0, 0);
+          } catch (e) {
+            console.error(e);
+          }
+        }
+
+        // Set actual canvas size to match container for crisp drawing
+        canvas.width = newWidth;
+        canvas.height = newHeight;
+        
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.fillStyle = 'white';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          
+          // Restore saved content if it was already drawn
+          if (hasContent && tempCanvas.width > 0 && tempCanvas.height > 0) {
+            try {
+              ctx.drawImage(tempCanvas, 0, 0, tempCanvas.width, tempCanvas.height, 0, 0, canvas.width, canvas.height);
+            } catch (e) {
+              console.error(e);
+            }
+          }
+
+          ctx.lineWidth = 3;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.strokeStyle = '#0f172a'; // slate-900
+        }
       }
-    }
+    });
+
+    resizeObserver.observe(container);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
   }, []);
 
   const startDrawing = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -45,7 +85,10 @@ export const SignaturePad: React.FC<SignaturePadProps> = ({ onSign, width = '100
 
     setIsDrawing(true);
     setHasDrawn(true);
-    setIsConfirmed(false); // Reset confirmation if they start drawing again
+    if (isConfirmed) {
+      setIsConfirmed(false);
+      onSign(null);
+    }
 
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
@@ -104,7 +147,7 @@ export const SignaturePad: React.FC<SignaturePadProps> = ({ onSign, width = '100
   };
 
   return (
-    <div className="flex flex-col items-center select-none">
+    <div className="flex flex-col items-center select-none pb-2 w-full">
       <div 
         ref={containerRef}
         className="border-2 border-slate-300 rounded-lg overflow-hidden touch-none"
@@ -150,15 +193,15 @@ export const SignaturePad: React.FC<SignaturePadProps> = ({ onSign, width = '100
             type="button"
             disabled={!hasDrawn || isConfirmed}
             onClick={confirmSignature}
-            className={`text-[10px] font-bold uppercase px-3 py-1 rounded transition-all cursor-pointer ${
+            className={`text-[11px] font-black uppercase px-3.5 py-1.5 rounded transition-all flex items-center gap-1 cursor-pointer shadow-xs ${
               !hasDrawn
                 ? 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200'
                 : isConfirmed
-                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
-                  : 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs'
+                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                  : 'bg-emerald-600 hover:bg-emerald-700 active:scale-95 text-white'
             }`}
           >
-            {isConfirmed ? 'Confirmado' : 'Concluir'}
+            {isConfirmed ? '✓ Assinatura Concluída' : 'Concluir Assinatura'}
           </button>
         </div>
       </div>

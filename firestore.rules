@@ -6,8 +6,13 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // Allow read/write for the unified application state
-    match /appState/current {
+    // Allow read/write for all application state documents (main, logs, clients chunks, current)
+    match /appState/{document} {
+      allow read, write: if true;
+    }
+
+    // Allow read/write for movement photos
+    match /movementPhotos/{id} {
       allow read, write: if true;
     }
   }
