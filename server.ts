@@ -5,6 +5,9 @@ import { GoogleGenAI } from "@google/genai";
 import fs from "fs/promises";
 import { initializeApp, setLogLevel as setAppLogLevel } from "firebase/app";
 import { initializeFirestore, doc, getDoc, setDoc, onSnapshot, setLogLevel as setFirestoreLogLevel } from "firebase/firestore";
+import { firebirdRouter } from "./server/firebird/routes.js";
+import { FirebirdService } from "./server/firebird/service.js";
+import { integrationRouter, notifyExternalSystem } from "./server/integration/routes.js";
 
 try {
   setAppLogLevel('silent');
@@ -214,6 +217,12 @@ async function startServer() {
     }
     isFirestoreLoaded = true;
   }
+
+  // Rotas de integração com Banco de Dados Firebird 5.0 e Stored Procedures
+  app.use("/api/firebird", firebirdRouter);
+
+  // Rotas de integração padronizada para sistemas externos (ERP, Fiscal, Estoque)
+  app.use("/api/v1/integracao", integrationRouter);
 
   app.get("/api/state", async (req, res) => {
     try {
@@ -506,6 +515,24 @@ async function loadFullStateFromFirestore(db: any): Promise<any | null> {
           console.warn("Could not write update to Firestore from server (permission or network limit). Fallback to database.json is active.", fErr.message);
         }
       }
+
+      // Persistir no Banco de Dados Firebird 5.0 (executando procedures e gravando lançamentos)
+      try {
+        FirebirdService.sincronizarEstadoCompleto(sharedState).catch((fbErr: any) => {
+          if (!fbErr?.message?.includes('Falha de conexão com Firebird')) {
+            console.warn("Aviso ao sincronizar Firebird 5.0:", fbErr.message);
+          }
+        });
+      } catch (fbInitErr) {}
+
+      // Notificar sistema externo via Webhook sobre atualizações de dados operacionais
+      try {
+        notifyExternalSystem('ESTADO_ATUALIZADO', {
+          total_movimentos: (sharedState.movements || []).length,
+          total_abastecimentos: (sharedState.supplyRecords || []).length,
+          timestamp: new Date().toISOString()
+        }).catch(() => {});
+      } catch (whErr) {}
       
       res.json({ status: "success" });
     } catch (err: any) {

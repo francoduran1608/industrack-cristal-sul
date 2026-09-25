@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useStore, cleanOccurrenceTypeName } from '../store';
-import { LogOut, Truck, LayoutDashboard, Route, Droplet, FileBarChart, Bot, Users, ClipboardList, Settings, Boxes, Receipt, Menu, PackageCheck, ChevronDown, ChevronUp } from 'lucide-react';
+import { LogOut, Truck, LayoutDashboard, Route, Droplet, FileBarChart, Bot, Users, ClipboardList, Settings, Boxes, Receipt, Menu, PackageCheck, ChevronDown, ChevronUp, Database } from 'lucide-react';
+import { FirebirdAuditModal } from './FirebirdAuditModal';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -9,6 +10,7 @@ interface LayoutProps {
 }
 
 export const Layout: React.FC<LayoutProps> = ({ children, activeTab, setActiveTab }) => {
+  const store = useStore();
   const { 
     currentUser, 
     logout, 
@@ -16,8 +18,9 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, setActiveTa
     updateSystemUser,
     hasPendingSync,
     triggerManualSync
-  } = useStore();
+  } = store;
 
+  const [isFirebirdModalOpen, setIsFirebirdModalOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(() => {
     return localStorage.getItem('sidebar_collapsed') === 'true';
   });
@@ -345,6 +348,20 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, setActiveTa
               )}
             </div>
 
+            {/* Botão Servidor & Firebird 5.0 */}
+            {(currentUser?.role === 'admin' || currentUser?.role === 'supervisor') && (
+              <button
+                id="btn-firebird-audit-modal"
+                onClick={() => setIsFirebirdModalOpen(true)}
+                className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold border border-slate-700 shadow-sm transition cursor-pointer"
+                title="Visualizar todos os lançamentos salvos no servidor e banco de dados Firebird 5.0"
+              >
+                <Database className="w-3.5 h-3.5 text-blue-400" />
+                <span className="hidden sm:inline">Servidor & Firebird</span>
+                <span className="sm:hidden">Firebird</span>
+              </button>
+            )}
+
             {currentUser?.role === 'admin' && (
               <div className="flex items-center gap-1 sm:gap-1.5 text-[11px] sm:border-r border-slate-200 sm:pr-4">
                 <span className="hidden sm:inline text-slate-500 uppercase font-black text-[9px] tracking-wider">Alt. Unidade:</span>
@@ -391,6 +408,13 @@ export const Layout: React.FC<LayoutProps> = ({ children, activeTab, setActiveTa
           </div>
         </div>
       </main>
+
+      {/* Modal de Auditoria do Servidor & Firebird 5.0 */}
+      <FirebirdAuditModal
+        isOpen={isFirebirdModalOpen}
+        onClose={() => setIsFirebirdModalOpen(false)}
+        appState={store}
+      />
     </div>
   );
 };

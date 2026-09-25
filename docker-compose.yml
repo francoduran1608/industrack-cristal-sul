@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  # 1. Banco de Dados Firebird 5.0 Oficial
+  firebird:
+    image: jacobalberty/firebird:5.0
+    container_name: firebird5_database
+    restart: unless-stopped
+    environment:
+      - ISC_PASSWORD=masterkey
+      - FIREBIRD_DATABASE=SISTEMA_LOGISTICA.FDB
+    ports:
+      - "3050:3050"
+    volumes:
+      - firebird_data:/firebird/data
+      - ./database/firebird/schema_firebird_5.0.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    networks:
+      - app_network
+
+  # 2. Servidor da Aplicação (Backend Express + Frontend Vite)
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sistema_logistica_app
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - FIREBIRD_HOST=firebird
+      - FIREBIRD_PORT=3050
+      - FIREBIRD_DATABASE=/firebird/data/SISTEMA_LOGISTICA.FDB
+      - FIREBIRD_USER=SYSDBA
+      - FIREBIRD_PASSWORD=masterkey
+    depends_on:
+      - firebird
+    volumes:
+      - app_data:/app/data
+    networks:
+      - app_network
+
+volumes:
+  firebird_data:
+    driver: local
+  app_data:
+    driver: local
+
+networks:
+  app_network:
+    driver: bridge

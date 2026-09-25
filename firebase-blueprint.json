@@ -1,0 +1,68 @@
+{
+  "entities": {
+    "AppState": {
+      "title": "Application State",
+      "description": "Holds synchronized state for vehicle movements, production queue, supply logs, registered entities, and settings.",
+      "type": "object",
+      "properties": {
+        "movements": {
+          "type": "array",
+          "description": "Vehicle movements in the industrial patio"
+        },
+        "supplies": {
+          "type": "array",
+          "description": "Supply fuel records"
+        },
+        "registeredVehicles": {
+          "type": "array",
+          "description": "Registered vehicles"
+        },
+        "registeredDrivers": {
+          "type": "array",
+          "description": "Registered drivers"
+        },
+        "registeredClients": {
+          "type": "array",
+          "description": "Registered clients"
+        },
+        "systemUsers": {
+          "type": "array",
+          "description": "Authorized operators and users"
+        },
+        "_updatedAt": {
+          "type": "string",
+          "description": "Last updated ISO timestamp"
+        }
+      }
+    },
+    "MovementPhoto": {
+      "title": "Movement Photo",
+      "description": "Photo record associated with a vehicle movement or checklist",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Movement or photo unique identifier"
+        },
+        "photo": {
+          "type": "string",
+          "description": "Base64 image or storage URL"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation timestamp"
+        }
+      }
+    }
+  },
+  "firestore": {
+    "/appState/{document}": {
+      "schema": "AppState",
+      "description": "Main application documents including main, logs, and client partitions"
+    },
+    "/movementPhotos/{id}": {
+      "schema": "MovementPhoto",
+      "description": "Storage for movement photos"
+    }
+  }
+}
